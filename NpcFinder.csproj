@@ -1,0 +1,21 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net48</TargetFramework>
+    <AssemblyName>NpcFinder</AssemblyName>
+    <RootNamespace>NpcFinder</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!--contentFiles: removes the Content folder that pops up in the solution explorer -->
+    <PackageReference Include="BlishHUD" Version="1.2.0" ExcludeAssets="runtime;contentFiles;analyzers" />
+    <!--building the project fails otherwise, when BlishHud assets are excluded -->
+    <PackageReference Include="System.ComponentModel.Composition" Version="6.0.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Reference Include="System.Net.Http" />
+    <Reference Include="System.Web.Extensions" />
+  </ItemGroup>
+
+</Project>

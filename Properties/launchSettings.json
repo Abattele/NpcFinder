@@ -1,0 +1,14 @@
+{
+  "profiles": {
+    "gw2": {
+        "commandName": "Executable",
+        "executablePath": "e:\\Games\\Others\\GW2\\blishhud\\Blish HUD.exe",
+        "commandLineArgs": "--debug --module \"$(ProjectDir)\\$(BaseOutputPath)\\$(Configuration)/$(TargetFramework)\\$(TargetName).bhm\" --settings \"..\\Settings_$(TargetName)\""
+    },
+    "powershell": {
+        "commandName": "Executable",
+        "executablePath": "e:\\Games\\Others\\GW2\\blishhud\\Blish HUD.exe",
+        "commandLineArgs": "--debug --process WindowsTerminal --window CASCADIA_HOSTING_WINDOW_CLASS --module \"$(ProjectDir)\\$(BaseOutputPath)\\$(Configuration)/$(TargetFramework)\\$(TargetName).bhm\" --settings \"..\\Settings_$(TargetName)\""
+    }
+  }
+}
