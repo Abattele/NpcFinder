@@ -12,6 +12,12 @@ namespace NpcFinder.Services
 {
     public class Gw2ApiService
     {
+
+
+        private static readonly bool DEBUG_LOGS = false;
+
+
+
         private readonly IGw2WebApiV2Client _v2;
         private readonly CacheStore _cache;
 
@@ -39,38 +45,37 @@ namespace NpcFinder.Services
             {
                 if (IsValidRect(cached.MapRect) && IsValidRect(cached.ContinentRect))
                     return cached;
-
                 // cached entry is garbage/old schema -> ignore it and refetch
             }
-
-
 
             ct.ThrowIfCancellationRequested();
 
             var map = await _v2.Maps.GetAsync(mapId).ConfigureAwait(false);
             if (map == null) return null;
 
-            // avoid RuntimeBinder: use reflection
+            var regionId = ReadIntProp(map, "RegionId");
             var floors = ReadIntArrayProp(map, "Floors");
             
-            var log = Blish_HUD.Logger.GetLogger<Gw2ApiService>();
 
+            var log = Blish_HUD.Logger.GetLogger<Gw2ApiService>();
             try
             {
-                
-                log.Info($"MapRect type: {map.MapRect.GetType().FullName}");
-                log.Info($"ContinentRect type: {map.ContinentRect.GetType().FullName}");
-                log.Info($"Floors extracted: {(floors == null ? "null" : string.Join(",", floors))}");
+                if (DEBUG_LOGS) {
+                    log.Info($"MapRect type: {map.MapRect.GetType().FullName}");
+                    log.Info($"ContinentRect type: {map.ContinentRect.GetType().FullName}");
+                    log.Info($"Floors extracted: {(floors == null ? "null" : string.Join(",", floors))}");
+                }
             }
             catch { }
+
 
             var mapRect = ReadRectAny(map.MapRect);
             var contRect = ReadRectAny(map.ContinentRect);
 
-           
-            log.Warn($"[RectParse] mapRect=({mapRect.X1},{mapRect.Y1},{mapRect.X2},{mapRect.Y2}) " +
-                     $"contRect=({contRect.X1},{contRect.Y1},{contRect.X2},{contRect.Y2}) " +
-                     $"types: mapRectType={map.MapRect.GetType().FullName} contRectType={map.ContinentRect.GetType().FullName}");
+           if(DEBUG_LOGS)
+                log.Warn($"[RectParse] mapRect=({mapRect.X1},{mapRect.Y1},{mapRect.X2},{mapRect.Y2}) " +
+                         $"contRect=({contRect.X1},{contRect.Y1},{contRect.X2},{contRect.Y2}) " +
+                         $"types: mapRectType={map.MapRect.GetType().FullName} contRectType={map.ContinentRect.GetType().FullName}");
 
 
             var info = new Gw2MapInfo
@@ -79,6 +84,7 @@ namespace NpcFinder.Services
                 Name = map.Name,
                 ContinentId = map.ContinentId,
                 DefaultFloor = map.DefaultFloor,
+                RegionId = regionId,
                 Floors = floors ?? Array.Empty<int>(),
                 MapRect = mapRect,
                 ContinentRect = contRect,
@@ -88,7 +94,16 @@ namespace NpcFinder.Services
             return info;
         }
 
-        // ---------- helpers ----------
+        // ---------- helpers ---------- //
+
+        private static int ReadIntProp(object obj, string propName)
+        {
+            if (obj == null) return 0;
+            var p = obj.GetType().GetProperty(propName, BindingFlags.Public | BindingFlags.Instance);
+            if (p == null) return 0;
+            try { return Convert.ToInt32(p.GetValue(obj)); } catch { return 0; }
+        }
+
 
         private static int[] ReadIntArrayProp(object obj, string propName)
         {
@@ -106,7 +121,7 @@ namespace NpcFinder.Services
             if (v is int[] ia) return ia;
             if (v is IEnumerable<int> ien) return ien.ToArray();
 
-            // Fallback: non-generic IEnumerable (convert elements)
+            // fallback: non-generic IEnumerable (convert elements)
             if (v is IEnumerable en)
             {
                 try

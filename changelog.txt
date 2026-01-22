@@ -1,0 +1,23 @@
+CHANGELOG JAN/FEB.2026: 
+
+I) Optimisations/Reworks - OK
+
+	I.1/ using debugging variable to suppress logs in production - OK
+
+	I.2/ optimization for faster seek -> first lookup the existing mapped regions from the map, then if i dont find them properly (404 <=> other region/continent/floor) - refetch the floors by  fully scanning everything via API - OK 
+
+	I.3/ clamp/skip insane screen coords (x->+-10k; y->+-10k) and log once (this arrives at the loading stage more often, it's a normal corner case that we have to skip to avoid resources usage) - OK 
+
+II) Features
+
+	II.1/ 1 Checkbox -> New way to seek for NPC via map look-up - TODO
+
+	II.2/ 3 Checkboxes -> If "NPC" is checked then show the NPCs of the respective map; If "Waypoints/POIs" is selected then also show the Waypoints/POIs; If "Monsters/Animals" selected then show mobs as well. - TODO 
+
+III) Bugs
+
+	III.0/ Make it more precise (example: Alainn from Lion's Arch) - OK (VERY HARD, TOOK 1 WEEK... Changed everything - added decisional trees with weights, added new models for queries, added hits & anchors in the tree, better parsing functions, better caching, multiple threading/tasking, semafore syncing for optimal non-concurrency, )
+
+	III.1/ Fixed the auto-opening of the window when restarting blish hud - OK
+
+	III.2/ The marker moves a bit, make it 'more' stationary but still precise - (i think it's because of the rectangle computation that's made dynamic - have to choose the center and recompute it after each anchor choice so it's more stable and at the same time decently precise... also dx/dy depend too much on the map how it's instantiated, however it's often dynamic in memory, so have to rethink this if i dont want the small offsets because of the map...) - TODO 

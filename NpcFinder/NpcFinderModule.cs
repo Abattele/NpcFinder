@@ -24,9 +24,6 @@ namespace NpcFinder
     public class NpcFinderModule : Module
     {
 
-
-
-
         // ---- imports ----
         internal SettingsManager SettingsManager => ModuleParameters.SettingsManager;
         internal ContentsManager ContentsManager => ModuleParameters.ContentsManager;
@@ -35,7 +32,45 @@ namespace NpcFinder
         internal static NpcFinderModule ExampleModuleInstance;
 
 
+
+
         // ---- fields ----
+
+
+
+        private static readonly bool DEBUG_LOGS = false; // instead of using property file i'm using constant for easier dev toggling in each class
+
+
+
+
+
+        private ChangelogWindow _changelogWindow;
+        private const string CHANGELOG_TEXT =
+        @"v1.1.0
+- Huge performance improvements
+- Much better precision (works for most of the NPCs now)
+- Added Suggestions panel
+- Added a marker that displays on the corner if it's off-screen
+- Stopped it from opening by itself.
+- Added changelog window
+- Improved NPC title suggestions (prefix + search + scoring)
+- Anchors fallback restored when no coordinates are parsed
+- Better caching system
+- UI improvements
+
+! Some NPCs may take a bit longer to resolve the position the first time 
+(due to caching) -> be patient (around max 2-3 minutes)
+
+** For the next version (v1.2.0) I'm planning to add a feature to search by MAP 
+and to display all the NPCs on that map ** 
+
+** Also I will try to fix the small offset of the marker when moving the map 
+in the next version **
+";
+
+
+
+
         private static readonly Logger Logger = Logger.GetLogger<NpcFinderModule>();
         private string _cacheDirPath;
         private string _merchantCacheDirPath;
@@ -51,7 +86,7 @@ namespace NpcFinder
         private Gw2MapDetailsService _details;
         private NpcMerchantResolverService _merchantResolver;
         private NpcFinderWindow _npcWindow;
-        private BigMapOverlayControl _overlay; // minimap overlay (not used yet) TODO
+       // private BigMapOverlayControl _overlay; // minimap overlay (not used yet) TODO
         private BigMapOverlayControl _bigMapOverlay;
         private NpcTarget _currentTarget;
         private int _currentContinentId;
@@ -66,7 +101,7 @@ namespace NpcFinder
 
         protected override void DefineSettings(SettingCollection settings)
         {
-            // not needed for now
+
         }
 
         private void ClearCurrentMarker()
@@ -76,7 +111,10 @@ namespace NpcFinder
             // force repaint if map is open (and even if it’s not)
             _bigMapOverlay?.Invalidate();
 
-            Logger.Warn("[Target] CLEARED (currentTarget=null)");
+            if (DEBUG_LOGS) {
+                Logger.Warn("[Target] CLEARED (currentTarget=null)");
+            }
+
         }
 
         private void DeleteAllNpcFinderCache()
@@ -89,7 +127,7 @@ namespace NpcFinder
                     return;
                 }
 
-                // Safety: only delete folder name
+                // safety: only delete folder name
                 var folderName = Path.GetFileName(_cacheDirPath.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
                 if (!string.Equals(folderName, "NpcFinderCache", StringComparison.OrdinalIgnoreCase))
                 {
@@ -97,26 +135,45 @@ namespace NpcFinder
                     return;
                 }
 
-                // Delete root cache
+                // delete root cache
                 if (Directory.Exists(_cacheDirPath))
                     Directory.Delete(_cacheDirPath, recursive: true);
 
-                // Recreate root cache folder
+                // recreate root cache folder
                 Directory.CreateDirectory(_cacheDirPath);
 
-                // Recreate merchant cache folder too (otherwise resolver can't write cache anymore)
+                // recreate merchant cache folder too (otherwise resolver can't write cache anymore)
                 if (!string.IsNullOrWhiteSpace(_merchantCacheDirPath))
                     Directory.CreateDirectory(_merchantCacheDirPath);
 
-                Logger.Warn("[Cache] Deleted and recreated: " + _cacheDirPath +
+                if (DEBUG_LOGS)
+                {
+                    Logger.Warn("[Cache] Deleted and recreated: " + _cacheDirPath +
                             " (merchant=" + (_merchantCacheDirPath ?? "null") + ")");
+                }
+
             }
             catch (Exception ex)
             {
-                Logger.Warn("[Cache] Delete failed: " + ex);
+                Logger.Warn("Exception [Cache] Delete failed: " + ex);
             }
         }
 
+
+        private void EnsureChangelogWindow()
+        {
+            if (_changelogWindow != null) return;
+
+            var bg = AsyncTexture2D.FromAssetId(155997);
+            _changelogWindow = new ChangelogWindow(bg, CHANGELOG_TEXT)
+            {
+                Parent = GameService.Graphics.SpriteScreen,
+                Location = new Point(340, 240),
+                Id = $"{nameof(NpcFinderModule)}_ChangelogWindow",
+                SavesPosition = true
+
+            };
+        }
 
         protected override async Task LoadAsync()
         {
@@ -141,9 +198,11 @@ namespace NpcFinder
             _cache = new CacheStore(_cacheDirPath);
 
 
-            Logger.Info($"[Cache] rootDir='{rootDir ?? "(null)"}'");
-            Logger.Info($"[Cache] cachePath='{System.IO.Path.Combine(rootDir ?? Path.GetTempPath(), "NpcFinderCache")}'");
-
+            if (DEBUG_LOGS)
+            {
+                Logger.Info($"[Cache] rootDir='{rootDir ?? "(null)"}'");
+                Logger.Info($"[Cache] cachePath='{System.IO.Path.Combine(rootDir ?? Path.GetTempPath(), "NpcFinderCache")}'");
+            }
 
             // services
             _rate = new RateLimiter(250);
@@ -157,7 +216,7 @@ namespace NpcFinder
 
             // merchant resolver cache folder INSIDE the same cache root already computed
             _merchantCacheDirPath = Path.Combine(_cacheDirPath, "merchant");
-            try { Directory.CreateDirectory(_merchantCacheDirPath); } catch { /* ignore */ }
+            try { Directory.CreateDirectory(_merchantCacheDirPath); } catch { }
 
             // merchant resolver (no direct coords -> anchor via POI/WP) + caching
             _merchantResolver = new NpcMerchantResolverService(_wiki, _mapIndex, _gw2, _details, _merchantCacheDirPath);
@@ -176,7 +235,10 @@ namespace NpcFinder
                     _currentTarget = t;
 
                     _bigMapOverlay?.Invalidate(); // helps immediate feedback
-                    Logger.Warn($"[Target] SET: {(t == null ? "null" : $"{t.MapName} cont={t.TargetContinentId} cx={t.TargetContinentX} cy={t.TargetContinentY}")}");
+                    if (DEBUG_LOGS)
+                    {
+                        Logger.Warn($"[Target] SET: {(t == null ? "null" : $"{t.MapName} cont={t.TargetContinentId} cx={t.TargetContinentX} cy={t.TargetContinentY}")}");
+                    }
                 },
 
                 () => {
@@ -195,14 +257,14 @@ namespace NpcFinder
 
 
 
-            // Create overlay once
+            // create overlay once
             _bigMapOverlay = new BigMapOverlayControl
             {
                 Parent = GameService.Graphics.SpriteScreen,
                 Location = new Point(0, 0),
                 Size = GameService.Graphics.SpriteScreen.Size,
                 Visible = true,
-                ZIndex = int.MaxValue,     // drawn on top of the world map
+                ZIndex = int.MaxValue,    
                 ClipsBounds = false,
                 TargetProvider = () => _currentTarget,
                 CurrentContinentIdProvider = () => _currentContinentId,
@@ -218,11 +280,9 @@ namespace NpcFinder
 
             CreateCornerIconWithContextMenu();
 
-            // show once by default
-            _npcWindow.Show();
-
             await Task.CompletedTask;
         }
+
 
         protected override void Update(GameTime gameTime)
         {
@@ -234,17 +294,14 @@ namespace NpcFinder
             _pollMs = 0;
 
 
-            // Only repaint when map is open (otherwise it's wasted)
+            // only repaint when map is open
             if (GameService.Gw2Mumble.UI.IsMapOpen)
             {
                 _bigMapOverlay?.Invalidate();
             }
 
+
             MumbleReader.DumpUiOncePerSecond(requireMapOpen: true);
-
-
-
-            _overlay?.Invalidate();
 
             int mapId;
             if (!MumbleReader.TryGetMapId(out mapId)) return;
@@ -269,9 +326,8 @@ namespace NpcFinder
             try { _cts?.Cancel(); } catch { }
 
             _npcWindow?.Dispose();
-            _overlay?.Dispose();
+            _changelogWindow?.Dispose();
             _bigMapOverlay?.Dispose();
-
 
             _cornerIcon?.Dispose();
             _contextMenuStrip?.Dispose();
@@ -300,14 +356,28 @@ namespace NpcFinder
             };
 
             _contextMenuStrip = new ContextMenuStrip();
-            _contextMenuStrip.AddMenuItem("NPC Finder (toggle)").Click += (s, e) => {
-                if (_npcWindow == null) return;
-                if (!_npcWindow.Visible) _npcWindow.Show();
-                else _npcWindow.ToggleWindow();
+            _contextMenuStrip.AddMenuItem("Changelog / Patch notes").Click += (s, e) =>
+            {
+                try
+                {
+                    EnsureChangelogWindow();
+
+                    // parent is important or it may not render on some setups
+                    if (_changelogWindow.Parent == null)
+                        _changelogWindow.Parent = GameService.Graphics.SpriteScreen;
+
+                    if (!_changelogWindow.Visible) _changelogWindow.Show();
+                    else _changelogWindow.ToggleWindow();
+                }
+                catch (Exception ex)
+                {
+                    Logger.Warn("[Changelog] Failed to open: " + ex);
+                }
             };
 
             _cornerIcon.Menu = _contextMenuStrip;
         }
 
     }
+
 }

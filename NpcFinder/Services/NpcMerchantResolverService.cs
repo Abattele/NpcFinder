@@ -16,6 +16,12 @@ namespace NpcFinder.Services
     public class NpcMerchantResolverService
     {
 
+
+        private static readonly bool DEBUG_LOGS = false;
+
+
+
+
         private static readonly Logger Logger = Logger.GetLogger<NpcMerchantResolverService>();
         private readonly WikiNpcService _wiki;
         private readonly Gw2MapIndexService _mapIndex;
@@ -23,11 +29,28 @@ namespace NpcFinder.Services
         private readonly Gw2MapDetailsService _details;
         private readonly string _cacheDir;
 
-        // tweak if you want: how long to trust cached results
+        // waypointName -> mapId cache (avoid rescanning maps every time)
+        private readonly Dictionary<string, int> _waypointToMapIdCache = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+
+
+        // tweak how long to trust cached results
         private static readonly TimeSpan CacheTtl = TimeSpan.FromDays(14);
 
+        // ---------------------- inline classes ----------------------
 
-        // inline classes
+        private sealed class LocationHint
+        {
+            public string Text;
+            public int Weight;
+            public string ScopeMap;
+            public string Source;
+
+            public override string ToString()
+            {
+                return $"{Text}(w={Weight},scope={(ScopeMap ?? "-")},src={(Source ?? "-")})";
+            }
+        }
+
         private class CacheWrapper
         {
             public string Title { get; set; }
@@ -52,8 +75,6 @@ namespace NpcFinder.Services
                 Score = score;
             }
         }
-
-        // constructor
         public NpcMerchantResolverService(
             WikiNpcService wiki,
             Gw2MapIndexService mapIndex,
@@ -75,16 +96,47 @@ namespace NpcFinder.Services
             catch { }
         }
 
+
         // ---------------------- PUBLIC ENTRY ----------------------
+
+        private static string TryGetSection(string all, string header)
+        {
+            if (string.IsNullOrWhiteSpace(all) || string.IsNullOrWhiteSpace(header)) return null;
+
+            var rx = new Regex(
+                @"(?is)^\s*==+\s*" + Regex.Escape(header) + @"\s*==+\s*(?<body>.*?)(^\s*==+|\z)",
+                RegexOptions.Multiline);
+
+            var m = rx.Match(all);
+            if (!m.Success) return null;
+            return m.Groups["body"].Value;
+        }
+
+        private IEnumerable<string> ExtractWaypointLinksFromText(string text)
+        {
+            if (string.IsNullOrWhiteSpace(text)) yield break;
+
+            foreach (Match m in Regex.Matches(text, @"\[\[(?<t>[^\]|#]+)(?:#[^\]|]+)?(?:\|(?<d>[^\]]+))?\]\]"))
+            {
+                var d = m.Groups["d"].Success ? m.Groups["d"].Value : null;
+                var t = m.Groups["t"].Success ? m.Groups["t"].Value : null;
+                var s = (d ?? t ?? "").Trim();
+
+                if (s.EndsWith(" Waypoint", StringComparison.OrdinalIgnoreCase) ||
+                    s.EndsWith(" WP", StringComparison.OrdinalIgnoreCase))
+                    yield return s;
+            }
+        }
 
         public async Task<List<NpcResolvedHit>> ResolveMerchantAsync(string npcTitle, CancellationToken ct)
         {
-
             // CACHE FIRST
             List<NpcResolvedHit> cached;
             if (TryLoadCachedResolvedHits(npcTitle, out cached))
             {
-                Logger.Debug("[MerchantResolve] CACHE HIT title='" + npcTitle + "' hits=" + cached.Count);
+                if (DEBUG_LOGS)
+                    Logger.Debug("[MerchantResolve] CACHE HIT title='" + npcTitle + "' hits=" + cached.Count);
+
                 return cached;
             }
 
@@ -93,29 +145,57 @@ namespace NpcFinder.Services
             if (wikiRes == null) return new List<NpcResolvedHit>();
 
             string wikitext = wikiRes.Wikitext ?? "";
-            var hints = BuildLocationHints(npcTitle, wikitext);
 
-            Logger.Debug("[MerchantResolve] title='" + npcTitle + "' hints=(" + hints.Count + ") " +
-                         string.Join(" | ", hints.Take(12)));
+            // weighted + scoped hints
+            var hints = BuildLocationHintsWeighted(npcTitle, wikitext);
+
+            if (DEBUG_LOGS)
+            {
+                Logger.Debug("[MerchantResolve] title='" + npcTitle + "' weightedHints=(" + hints.Count + ") " +
+                             string.Join(" | ", hints.Take(12)));
+            }
+
+            // resolve ALL possible mapIds (use best map-name candidates from hints)
+            var mapNameCandidates = BuildMapNameCandidatesFromHints(hints);
+            var mapIds = await ResolveAllMapIdsFromHintsAsync(mapNameCandidates, ct).ConfigureAwait(false);
 
 
-            // Resolve ALL possible mapIds
-            var mapIds = await ResolveAllMapIdsFromHintsAsync(hints, ct).ConfigureAwait(false);
             if (mapIds.Count == 0)
             {
-                Logger.Warn("[MerchantResolve] could not resolve any mapId from hints.");
-                return new List<NpcResolvedHit>();
+                // RARE FALLBACK: only if map-name resolution failed completely.
+                var wpCandidates = BuildWaypointCandidatesFromHints(hints);
+
+                for (int i = 0; i < wpCandidates.Count; i++)
+                {
+                    ct.ThrowIfCancellationRequested();
+
+                    int? wpMapId = await ResolveMapIdByWaypointNameAsync(wpCandidates[i], ct).ConfigureAwait(false);
+                    if (wpMapId.HasValue)
+                        mapIds.Add(wpMapId.Value);
+                }
+
+                // still nothing -> then can't locate it.
+                if (mapIds.Count == 0)
+                {
+                    if (DEBUG_LOGS)
+                        Logger.Warn("[MerchantResolve] could not resolve any mapId from hints (including waypoint fallback).");
+
+                    return new List<NpcResolvedHit>();
+                }
             }
 
 
-            // Extract NPC coordinates from wikitext
+            // extract NPC coordinates from wikitext
             var coordHints = ExtractNpcCoordinates(wikitext);
-            if (coordHints.Count > 0)
-                Logger.Warn("[MerchantResolve] extracted " + coordHints.Count + " coord hint(s): " +
-                            string.Join(" | ", coordHints.Take(5).Select(c => "[" + c.x + "," + c.y + "] map='" + (c.mapName ?? "") + "'")));
 
+            if (DEBUG_LOGS && coordHints.Count > 0)
+            {
+                Logger.Debug("[MerchantResolve] extracted " + coordHints.Count + " coord hint(s): " +
+                             string.Join(" | ", coordHints.Take(5).Select(c => "[" + c.x + "," + c.y + "] map='" + (c.mapName ?? "") + "'")));
+            }
 
             var hits = new List<NpcResolvedHit>();
+
             for (int mi = 0; mi < mapIds.Count; mi++)
             {
                 int mapId = mapIds[mi];
@@ -124,21 +204,25 @@ namespace NpcFinder.Services
                 var mapInfo = await _gw2.GetMapInfoAsync(mapId, ct).ConfigureAwait(false);
                 if (mapInfo == null)
                 {
-                    Logger.Warn("[MerchantResolve] mapInfo null for mapId=" + mapId);
+                    if (DEBUG_LOGS)
+                        Logger.Warn("[MerchantResolve] mapInfo null for mapId=" + mapId);
                     continue;
                 }
 
-                Logger.Info("[MapInfo] mapId=" + mapId + " name='" + mapInfo.Name + "' continentId=" + mapInfo.ContinentId + " defaultFloor=" + mapInfo.DefaultFloor);
+                if (DEBUG_LOGS)
+                    Logger.Info("[MapInfo] mapId=" + mapId + " name='" + mapInfo.Name + "' continentId=" + mapInfo.ContinentId + " defaultFloor=" + mapInfo.DefaultFloor);
 
                 PoiWpFloorResult anchors = await _details.GetPoisAndWaypointsWithFloorFallbackAsync(
                     mapInfo.ContinentId,
                     mapInfo.DefaultFloor,
                     mapInfo.Floors,
                     mapInfo.Id,
+                    mapInfo.RegionId,
                     ct
                 ).ConfigureAwait(false);
 
-                Logger.Debug("[MerchantResolve] mapId=" + mapInfo.Id + " usedFloor=" + anchors.UsedFloor + " pois=" + anchors.Pois.Count + " wps=" + anchors.Waypoints.Count);
+                if (DEBUG_LOGS)
+                    Logger.Debug("[MerchantResolve] mapId=" + mapInfo.Id + " usedFloor=" + anchors.UsedFloor + " pois=" + anchors.Pois.Count + " wps=" + anchors.Waypoints.Count);
 
                 if (anchors.Pois.Count == 0 && anchors.Waypoints.Count == 0)
                 {
@@ -156,14 +240,7 @@ namespace NpcFinder.Services
                     continue;
                 }
 
-                // If we have coords for this map, use them directly (NPC pin), otherwise fallback to WP/POI scoring
-                // Basically the algorithm searches first for NPC location from wikitext if available (the interractive map)
-                // then, if it has no coords then search for nearest WP/POI, otherwise fallback to name scoring. 
-                // Priority has WP over POI. If an NPC is on 2 maps (like Farmer Arlo) then get the coords from wikitext
-                // and use them for the respective map -> attention, on wikitext there is only 1 interractive map with 1 coord set,
-                // so for the other map we will fallback to name scoring. -> identify which map has the coords via a rectangle check matching alg.
-                // and use that coord only for that map.
-
+                // try NPC coords first, else fallback to WP/POI scoring.
                 var maybeNpcPos = PickBestCoordForMap(coordHints, mapInfo.Name, mapInfo, mapIds.Count);
 
                 ScoredCandidate best = null;
@@ -185,23 +262,173 @@ namespace NpcFinder.Services
                     }
                 }
 
-                // Fallback: name scoring algorithm
+                // fallback: weighted name scoring algorithm
                 if (best == null)
                 {
                     var candidates = new List<ScoredCandidate>();
 
+                    // build strong "place terms" for THIS map.
+                    
+
+                    // 1/ prefer scoped leaf hints (Place/SynthWaypoint) under this map.
+                    // 2/ If none exist, promote LocationsTree:Map terms (scope-less) into place terms.
+                    // this fixes cases where a sub-location appears as a Map node.
+
+                    var strongPlaceTerms = new List<string>();
+
+                    // 0/ If we have scoped high-weight hints for THIS map, use them as strongPlaceTerms (best signal)
+                    strongPlaceTerms.AddRange(
+                        hints.Where(h => h != null
+                                         && !string.IsNullOrWhiteSpace(h.ScopeMap)
+                                         && string.Equals(h.ScopeMap, mapInfo.Name, StringComparison.OrdinalIgnoreCase)
+                                         && h.Weight >= 400)
+                             .Select(h => h.Text)
+                    );
+
+
+                    strongPlaceTerms.AddRange(
+                        hints.Where(h => h != null
+                                         && !string.IsNullOrWhiteSpace(h.ScopeMap)
+                                         && string.Equals(h.ScopeMap, mapInfo.Name, StringComparison.OrdinalIgnoreCase)
+                                         && h.Source != null
+                                         && (h.Source.StartsWith("LocationsTree:Place", StringComparison.OrdinalIgnoreCase)
+                                             || h.Source.StartsWith("LocationsTree:SynthWaypoint", StringComparison.OrdinalIgnoreCase))
+                                         && h.Weight >= 400)
+                             .Select(h => h.Text)
+                    );
+
+
+                    if (strongPlaceTerms.Count == 0)
+                    {
+                        var mapNodes = hints
+                            .Where(h => h != null
+                                        && h.Source != null
+                                        && h.Source.StartsWith("LocationsTree:Map", StringComparison.OrdinalIgnoreCase)
+                                        && h.Weight >= 200
+                                        && !string.IsNullOrWhiteSpace(h.Text)
+                                        && !string.Equals(h.Text, mapInfo.Name, StringComparison.OrdinalIgnoreCase))
+                            .Select(h => h.Text.Trim())
+                            .Distinct(StringComparer.OrdinalIgnoreCase)
+                            .ToList();
+
+                        
+                        var evidence = hints
+                            .Where(h => h != null
+                                        && !string.IsNullOrWhiteSpace(h.Text)
+                                        && (h.Source == null || !h.Source.StartsWith("LocationsTree:", StringComparison.OrdinalIgnoreCase)))
+                            .Select(h => h.Text)
+                            .ToList();
+
+                        bool isMemoryMap = IsMemoryMapName(mapInfo.Name);
+
+                        var memoryTagged = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+                        for (int k = 0; k < mapNodes.Count; k++)
+                        {
+                            string node = mapNodes[k];
+                            for (int e = 0; e < evidence.Count; e++)
+                            {
+                                var ev = evidence[e];
+                                if (ev.IndexOf(node, StringComparison.OrdinalIgnoreCase) < 0) continue;
+
+                                if (ev.IndexOf("Memory of", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                                    ev.IndexOf("(", StringComparison.OrdinalIgnoreCase) >= 0 && ev.IndexOf("Memory of", StringComparison.OrdinalIgnoreCase) >= 0)
+                                {
+                                    memoryTagged.Add(node);
+                                    break;
+                                }
+                            }
+                        }
+
+                        if (isMemoryMap)
+                        {
+                            // on memory maps, prefer memory-tagged nodes
+                            for (int k = 0; k < mapNodes.Count; k++)
+                            {
+                                string node = mapNodes[k];
+                                if (memoryTagged.Contains(node))
+                                    strongPlaceTerms.Add(node);
+                            }
+                        }
+                        else
+                        {
+                            // on non-memory maps:
+
+                            // if exactly one node is memory-tagged, prefer the other node.
+                            if (memoryTagged.Count == 1 && mapNodes.Count >= 1)
+                            {
+                                for (int k = 0; k < mapNodes.Count; k++)
+                                {
+                                    string node = mapNodes[k];
+                                    if (!memoryTagged.Contains(node))
+                                        strongPlaceTerms.Add(node);
+                                }
+                            }
+                            else
+                            {
+                                // fallback: do nothing (avoid cross-map contamination !!! very important here)
+                            }
+                        }
+                    }
+
+
+                    strongPlaceTerms = strongPlaceTerms
+                        .Where(s => !string.IsNullOrWhiteSpace(s))
+                        .Select(s => s.Trim())
+                        .Distinct(StringComparer.OrdinalIgnoreCase)
+                        .ToList();
+
+
+                    if (DEBUG_LOGS)
+                        Logger.Debug("[MerchantResolve] strongPlaceTerms map=" + mapInfo.Name + " => " + string.Join(", ", strongPlaceTerms));
+
+
+                    // -------- WAYPOINTS -------- 
+
                     for (int i = 0; i < anchors.Waypoints.Count; i++)
                     {
                         var w = anchors.Waypoints[i];
-                        int s = ScoreCandidate(w.Item1, hints);
-                        if (s > 0) candidates.Add(new ScoredCandidate("Waypoint", w.Item1, w.Item2, w.Item3, s));
+
+                        int s = ScoreCandidateWeighted(w.Item1, hints, mapInfo.Name);
+
+
+                        // deterministic boost if wp name matches strong place terms for this map.
+                        if (strongPlaceTerms.Count > 0 && ContainsAny(w.Item1, strongPlaceTerms))
+                            s += 900;
+
+                        if (s > 0)
+                            candidates.Add(new ScoredCandidate("Waypoint", w.Item1, w.Item2, w.Item3, s));
                     }
 
+                    // -------- POIS --------
                     for (int i = 0; i < anchors.Pois.Count; i++)
                     {
                         var p = anchors.Pois[i];
-                        int s = ScoreCandidate(p.Item1, hints);
-                        if (s > 0) candidates.Add(new ScoredCandidate("POI", p.Item1, p.Item2, p.Item3, s));
+
+                        int s = ScoreCandidateWeighted(p.Item1, hints, mapInfo.Name);
+
+                        // don't allow "Old ..." POIs to hijack real maps.
+                        // if we're on a non-memory map and the POI starts with "Old ", crush it even if strongPlaceTerms is empty.
+                        // had this problem with Old Lion's Arch where it would send me under water instead of prefering a wp for NPC Alainn
+                        if (!IsMemoryMapName(mapInfo.Name) && IsOldPrefixed(p.Item1))
+                            s = (int)(s * 0.05);
+                        else if (strongPlaceTerms.Count > 0 && IsOldPrefixed(p.Item1))
+                            s = (int)(s * 0.10);
+
+
+                        // tiny bonus if POI matches strong place terms (keeps POIs relevant but not dominant)
+                        if (strongPlaceTerms.Count > 0 && ContainsAny(p.Item1, strongPlaceTerms))
+                            s += 80;
+
+                        if (s > 0)
+                            candidates.Add(new ScoredCandidate("POI", p.Item1, p.Item2, p.Item3, s));
+                    }
+
+                    if (DEBUG_LOGS)
+                    {
+                        var top = candidates.OrderByDescending(x => x.Score).Take(5).ToList();
+                        Logger.Warn("[MerchantResolve] TOP candidates map=" + mapInfo.Name + " => " +
+                            string.Join(" | ", top.Select(x => x.Kind + ":" + x.Name + "(s=" + x.Score + ")")));
                     }
 
                     if (candidates.Count == 0)
@@ -222,7 +449,7 @@ namespace NpcFinder.Services
 
                     best = candidates
                         .OrderByDescending(c => c.Score)
-                        .ThenBy(c => c.Kind) // Waypoint before POI
+                        .ThenBy(c => KindRank(c.Kind))
                         .First();
                 }
 
@@ -242,13 +469,14 @@ namespace NpcFinder.Services
                     continue;
                 }
 
-                // for /continents/.../maps/{mapId} points, these are continent coords already
+                // these are already continent coords from /continents/.../maps/{mapId}
                 double cx = best.X;
                 double cy = best.Y;
 
-                Logger.Warn("[MerchantResolve] HIT map=" + mapInfo.Name + " cont=" + mapInfo.ContinentId +
-                            " best=" + best.Kind + ":" + best.Name + " @" + best.X + "," + best.Y +
-                            " -> continent=(" + cx + "," + cy + ")");
+                if (DEBUG_LOGS)
+                    Logger.Warn("[MerchantResolve] HIT map=" + mapInfo.Name + " cont=" + mapInfo.ContinentId +
+                                " best=" + best.Kind + ":" + best.Name + " @" + best.X + "," + best.Y +
+                                " -> continent=(" + cx + "," + cy + ")");
 
                 hits.Add(new NpcResolvedHit
                 {
@@ -263,18 +491,29 @@ namespace NpcFinder.Services
                 });
             }
 
+            // prefer real map over "Memory of ...", then alpha, then Waypoint before POI
+            // had this for an instance/story map
             hits = hits
-                .OrderBy(h => h.MapName, StringComparer.OrdinalIgnoreCase)
+                .OrderBy(h => IsMemoryMapName(h.MapName) ? 1 : 0)
+                .ThenBy(h => h.MapName, StringComparer.OrdinalIgnoreCase)
                 .ThenBy(h => h.Source.StartsWith("Waypoint:", StringComparison.OrdinalIgnoreCase) ? 0 : 1)
                 .ToList();
 
-            if (hits.Count == 0)
+            if (hits.Count == 0 && DEBUG_LOGS)
                 Logger.Warn("[MerchantResolve] No hits produced.");
 
-            // SAVE CACHE (even if empty we can cache to avoid repeated work)
+            // SAVE CACHE
             SaveCachedResolvedHits(npcTitle, hits);
 
             return hits;
+        }
+
+        private static int KindRank(string kind)
+        {
+            // lower is better
+            if (kind.Equals("Waypoint", StringComparison.OrdinalIgnoreCase)) return 0;
+            if (kind.Equals("POI", StringComparison.OrdinalIgnoreCase)) return 1;
+            return 2;
         }
 
         // ---------------------- DISK CACHE ----------------------
@@ -286,10 +525,7 @@ namespace NpcFinder.Services
                 if (!string.IsNullOrWhiteSpace(_cacheDir))
                     Directory.CreateDirectory(_cacheDir);
             }
-            catch
-            {
-                
-            }
+            catch { }
         }
 
         private bool TryLoadCachedResolvedHits(string title, out List<NpcResolvedHit> hits)
@@ -308,7 +544,7 @@ namespace NpcFinder.Services
                 var fi = new FileInfo(path);
                 if (fi.Length <= 2) return false;
 
-                // TTL 14 days
+                // TTL
                 if (DateTime.UtcNow - fi.LastWriteTimeUtc > CacheTtl)
                     return false;
 
@@ -322,7 +558,7 @@ namespace NpcFinder.Services
             }
             catch (Exception ex)
             {
-                Logger.Warn("[MerchantResolve] cache read failed: " + ex.Message);
+                Logger.Warn("Exception [MerchantResolve] cache read failed: " + ex.Message);
                 return false;
             }
         }
@@ -347,14 +583,14 @@ namespace NpcFinder.Services
                 string json = JsonSerializer.Serialize(wrapper);
                 File.WriteAllText(path, json, Encoding.UTF8);
 
-                Logger.Debug("[MerchantResolve] cache write OK path=" + path);
+                if (DEBUG_LOGS)
+                    Logger.Debug("[MerchantResolve] cache write OK path=" + path);
             }
             catch (Exception ex)
             {
-                Logger.Warn("[MerchantResolve] cache write failed: " + ex.Message);
+                Logger.Warn("Exception [MerchantResolve] cache write failed: " + ex.Message);
             }
         }
-
 
         private string GetCacheFilePath(string title)
         {
@@ -415,22 +651,49 @@ namespace NpcFinder.Services
                 .Where(s => !s.Contains(":"))
                 .Distinct(StringComparer.OrdinalIgnoreCase)
                 .ToList();
-
+             
             for (int i = 0; i < expanded.Count; i++)
             {
                 ct.ThrowIfCancellationRequested();
 
                 string name = expanded[i];
 
-                if (Regex.IsMatch(name, @"\b(the|a|an|merchant|npc|bandit|scout|animal|farmer|watchman)\b",
-                                  RegexOptions.IgnoreCase))
+                string nTrim = (name ?? "").Trim();
+
+                if (string.Equals(nTrim, "the", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(nTrim, "a", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(nTrim, "an", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(nTrim, "merchant", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(nTrim, "npc", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(nTrim, "bandit", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(nTrim, "scout", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(nTrim, "animal", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(nTrim, "farmer", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(nTrim, "watchman", StringComparison.OrdinalIgnoreCase))
+                {
                     continue;
+                }
+
 
                 int? id = await _mapIndex.ResolveMapIdByNameAsync(name, ct).ConfigureAwait(false);
-                Logger.Debug("[MerchantResolve] try mapName='" + name + "' => mapId=" + (id.HasValue ? id.Value.ToString() : "null"));
+
+                if (!id.HasValue)
+                {
+                    // WAYPOINT -> MAPID fallback (only if the candidate really looks like a waypoint)
+                    bool looksLikeWaypoint =
+                        name.EndsWith(" Waypoint", StringComparison.OrdinalIgnoreCase) ||
+                        name.EndsWith(" WP", StringComparison.OrdinalIgnoreCase);
+
+                    if (looksLikeWaypoint)
+                        id = await ResolveMapIdByWaypointNameAsync(name, ct).ConfigureAwait(false);
+                }
+
+                if (DEBUG_LOGS)
+                    Logger.Debug("[MerchantResolve] try mapName='" + name + "' => mapId=" + (id.HasValue ? id.Value.ToString() : "null"));
 
                 if (id.HasValue)
                     ids.Add(id.Value);
+
 
                 if (ids.Count >= 15) break;
             }
@@ -438,14 +701,154 @@ namespace NpcFinder.Services
             return ids.ToList();
         }
 
+        private List<string> BuildMapNameCandidatesFromHints(List<LocationHint> hints)
+        {
+            if (hints == null || hints.Count == 0) return new List<string>();
+
+            // prefer high-weight items first; include ScopeMap too
+            var items = new List<(string text, int weight)>();
+
+            for (int i = 0; i < hints.Count; i++)
+            {
+                var h = hints[i];
+                if (h == null) continue;
+
+                if (!string.IsNullOrWhiteSpace(h.ScopeMap))
+                    items.Add((h.ScopeMap, h.Weight + 80));
+
+                if (!string.IsNullOrWhiteSpace(h.Text))
+                    items.Add((h.Text, h.Weight));
+            }
+
+            items = items
+                .OrderByDescending(x => x.weight)
+                .ToList();
+
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var result = new List<string>();
+
+            for (int i = 0; i < items.Count; i++)
+            {
+                var s = CleanHint(items[i].text);
+                if (string.IsNullOrWhiteSpace(s)) continue;
+
+                if (s.Length < 3 || s.Length > 60) continue;
+
+                // map-name candidates must be map-like.
+                // if we allow "Waypoint" strings in here, the fallback may trigger a lot of expensive scanning.
+                if (s.IndexOf("Waypoint", StringComparison.OrdinalIgnoreCase) >= 0) continue;
+                if (s.EndsWith(" WP", StringComparison.OrdinalIgnoreCase)) continue;
+                if (s.IndexOf("POI", StringComparison.OrdinalIgnoreCase) >= 0) continue;
+
+
+                if (seen.Add(s))
+                    result.Add(s);
+
+                if (result.Count >= 80) break;
+            }
+
+            return result;
+        }
+
         // ---------------------- COORD EXTRACTION ----------------------
+        private async Task<int?> ResolveMapIdByWaypointNameAsync(string waypointName, CancellationToken ct)
+        {
+            waypointName = CleanHint(waypointName);
+            if (string.IsNullOrWhiteSpace(waypointName)) return null;
+
+            int cached;
+            if (_waypointToMapIdCache.TryGetValue(waypointName, out cached) && cached > 0)
+                return cached;
+
+            // get all map ids from the index (cached by Gw2MapIndexService)
+            var allMapIds = await _mapIndex.GetAllKnownMapIdsAsync(ct).ConfigureAwait(false);
+            if (allMapIds == null || allMapIds.Count == 0) return null;
+
+            // safety cap
+            int scanCap = Math.Min(allMapIds.Count, 120); // from testing i saw 120 is OK for optimal seek and results
+
+            for (int i = 0; i < scanCap; i++)
+            {
+                ct.ThrowIfCancellationRequested();
+
+                int mapId = allMapIds[i];
+
+                var mapInfo = await _gw2.GetMapInfoAsync(mapId, ct).ConfigureAwait(false);
+                if (mapInfo == null) continue;
+
+                var anchors = await _details.GetPoisAndWaypointsWithFloorFallbackAsync(
+                    mapInfo.ContinentId,
+                    mapInfo.DefaultFloor,
+                    mapInfo.Floors,
+                    mapInfo.Id,
+                    mapInfo.RegionId,
+                    ct
+                ).ConfigureAwait(false);
+
+                for (int w = 0; w < anchors.Waypoints.Count; w++)
+                {
+                    if (string.Equals(anchors.Waypoints[w].Item1, waypointName, StringComparison.OrdinalIgnoreCase))
+                    {
+                        _waypointToMapIdCache[waypointName] = mapId;
+
+                        if (DEBUG_LOGS)
+                            Logger.Debug("[MerchantResolve] waypoint->mapId '" + waypointName + "' => " + mapId);
+
+                        return mapId;
+                    }
+                }
+            }
+
+            if (DEBUG_LOGS)
+                Logger.Debug("[MerchantResolve] waypoint->mapId NOT FOUND '" + waypointName + "' (scanned " + scanCap + " maps)");
+
+            return null;
+        }
+
+
+
+        private List<string> BuildWaypointCandidatesFromHints(List<LocationHint> hints)
+        {
+            if (hints == null || hints.Count == 0) return new List<string>();
+
+            // prefer the synthetic waypoints we created from the Locations tree (best signal)
+            // then anything else that already looks like a waypoint
+            var items = new List<(string text, int weight)>();
+
+            for (int i = 0; i < hints.Count; i++)
+            {
+                var h = hints[i];
+                if (h == null) continue;
+                if (string.IsNullOrWhiteSpace(h.Text)) continue;
+
+                bool isSynthWp = h.Source != null &&
+                                 h.Source.StartsWith("LocationsTree:SynthWaypoint", StringComparison.OrdinalIgnoreCase);
+
+                bool looksLikeWp =
+                    h.Text.EndsWith(" Waypoint", StringComparison.OrdinalIgnoreCase) ||
+                    h.Text.EndsWith(" WP", StringComparison.OrdinalIgnoreCase);
+
+                if (isSynthWp || looksLikeWp)
+                    items.Add((h.Text, h.Weight));
+            }
+
+            return items
+                .OrderByDescending(x => x.weight)
+                .Select(x => CleanHint(x.text))
+                .Where(s => !string.IsNullOrWhiteSpace(s))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .Take(3)   // keep small
+                .ToList();
+        }
+
+
 
         private List<(string mapName, int x, int y)> ExtractNpcCoordinates(string wikitext)
         {
             var list = new List<(string mapName, int x, int y)>();
             if (string.IsNullOrWhiteSpace(wikitext)) return list;
 
-            // NPC infobox: | coordinates = [43696, 28628] for example
+            // NPC infobox: | coordinates = [43696, 28628]
             foreach (Match m in Regex.Matches(
                          wikitext,
                          @"\bcoordinates\s*=\s*\[\s*(?<x>-?\d+)\s*,\s*(?<y>-?\d+)\s*\]",
@@ -573,39 +976,333 @@ namespace NpcFinder.Services
             return new ScoredCandidate(kind, best.Item1, best.Item2, best.Item3, 0);
         }
 
-        // ---------------------- HINT PIPELINE ----------------------
+        // ---------------------- HINT PIPELINE (weighted + scoped) ----------------------
 
-        private List<string> BuildLocationHints(string title, string wikitext)
+        // if infobox location is : "Fort Marriner| Sanctum Harbor (Memory of Old Lion's Arch)"
+        // interpret as: Fort Marriner @ Lion's Arch, Sanctum Harbor @ Memory of Old Lion's Arch
+        private void AddInfoboxSplitMemoryHints(List<LocationHint> hints, string infoboxLocationRaw)
         {
-            var ordered = new List<string>();
+            if (string.IsNullOrWhiteSpace(infoboxLocationRaw)) return;
 
-            var infobox = ExtractInfoboxMap(wikitext);
-            if (!string.IsNullOrWhiteSpace(infobox)) ordered.Add(infobox);
+            // normalize
+            string raw = infoboxLocationRaw.Trim();
 
-            var locLinks = ExtractLinksFromSection(wikitext, "Location");
-            for (int i = 0; i < locLinks.Count; i++) ordered.Add(locLinks[i]);
+            // must contain "|" and "(Memory of"
+            int pipe = raw.IndexOf('|');
+            int memIdx = raw.IndexOf("(Memory of", StringComparison.OrdinalIgnoreCase);
+            if (pipe < 0 || memIdx < 0) return;
 
-            var lead = ExtractLeadSentenceLocation(wikitext);
-            for (int i = 0; i < lead.Count; i++) ordered.Add(lead[i]);
+            string left = raw.Substring(0, pipe).Trim(); // Fort Marriner
+            string rightPlus = raw.Substring(pipe + 1).Trim(); // Sanctum Harbor (Memory of Old Lion's Arch)
 
-            var phrases = ExtractPlainLocationPhrases(wikitext);
-            for (int i = 0; i < phrases.Count; i++) ordered.Add(phrases[i]);
+            // extract memory map name inside parentheses
+            int open = rightPlus.IndexOf('(');
+            int close = rightPlus.LastIndexOf(')');
+            if (open < 0 || close <= open) return;
 
-            var allLinks = ExtractAllLinks(wikitext);
-            for (int i = 0; i < allLinks.Count; i++) ordered.Add(allLinks[i]);
+            string right = rightPlus.Substring(0, open).Trim(); // Sanctum Harbor
+            string paren = rightPlus.Substring(open + 1, close - open - 1).Trim(); // "Memory of Old Lion's Arch"
 
-            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            var final = new List<string>();
+            // paren might be "Memory of Old Lion's Arch"
+            string memoryMap = paren;
 
-            for (int i = 0; i < ordered.Count; i++)
+
+            // big optimisation : 
+            // if we already have a resolved map "Lion's Arch" in the page hints, that’s the default.
+            // otherwise leave scope null and it won't dominate.
+            // try to infer the "main map" from the LocationsTree:Map nodes already collected.
+            // prefer a non-memory map node if present.
+            string mainMap = null;
+
+            for (int i = 0; i < hints.Count; i++)
             {
-                var s = CleanHint(ordered[i]);
-                if (string.IsNullOrWhiteSpace(s)) continue;
-                if (seen.Add(s)) final.Add(s);
+                var h = hints[i];
+                if (h == null) continue;
+                if (h.Source == null) continue;
+                if (!h.Source.StartsWith("LocationsTree:Map", StringComparison.OrdinalIgnoreCase)) continue;
+                if (string.IsNullOrWhiteSpace(h.Text)) continue;
+
+                // prefer non-memory map nodes as main map
+                if (!IsMemoryMapName(h.Text))
+                {
+                    mainMap = h.Text.Trim();
+                    break;
+                }
             }
+
+            if (!string.IsNullOrWhiteSpace(left))
+                hints.Add(new LocationHint { Text = left, Weight = 500, ScopeMap = mainMap, Source = "Infobox:Scoped" });
+
+            if (!string.IsNullOrWhiteSpace(right))
+                hints.Add(new LocationHint { Text = right, Weight = 500, ScopeMap = memoryMap, Source = "Infobox:Scoped" });
+        }
+
+        private List<LocationHint> BuildLocationHintsWeighted(string title, string wikitext)
+        {
+            var hints = new List<LocationHint>();
+            if (string.IsNullOrWhiteSpace(wikitext)) return hints;
+
+            // strip historical section
+            string pruned = StripSection(wikitext, "Historical locations");
+            pruned = StripSection(pruned, "Historic locations");
+
+            // 1/ locations tree (strongest signal)
+            var tree = ExtractLocationsTree(pruned);
+
+            for (int i = 0; i < tree.Count; i++)
+            {
+                var map = tree[i].map;
+                var place = tree[i].place;
+
+                // IMPORTANT:
+                // map hints should not be scoped to themselves.
+                if (!string.IsNullOrWhiteSpace(map))
+                    hints.Add(new LocationHint { Text = map, Weight = 240, ScopeMap = null, Source = "LocationsTree:Map" });
+
+                // place hints are scoped to their parent map.
+                if (!string.IsNullOrWhiteSpace(place))
+                {
+                    hints.Add(new LocationHint { Text = place, Weight = 520, ScopeMap = map, Source = "LocationsTree:Place" });
+
+                    // synthetic: helps match actual candidates like "Fort Marriner Waypoint"
+                    hints.Add(new LocationHint { Text = place + " Waypoint", Weight = 430, ScopeMap = map, Source = "LocationsTree:SynthWaypoint" });
+                    hints.Add(new LocationHint { Text = place + " WP", Weight = 320, ScopeMap = map, Source = "LocationsTree:SynthWaypoint" });
+                }
+            }
+
+            // 2/ Infobox map/location fields
+            var infobox = ExtractInfoboxMap(pruned);
+            if (!string.IsNullOrWhiteSpace(infobox))
+            {
+                // first: add scoped hints if it matches the special split format
+                AddInfoboxSplitMemoryHints(hints, infobox);
+
+                // after: keep the raw infobox hint (low weight) as a general map-name hint
+                hints.Add(new LocationHint { Text = infobox, Weight = 120, ScopeMap = null, Source = "Infobox" });
+            }
+
+
+            // 3/ location section links (moderate)
+            var locLinks = ExtractLinksFromSection(pruned, "Location");
+            for (int i = 0; i < locLinks.Count; i++)
+                hints.Add(new LocationHint { Text = locLinks[i], Weight = 170, ScopeMap = null, Source = "Section:Location" });
+
+
+            // 3b/ strong waypoint links explicitly mentioned inside the location section
+
+            // some pages recommend a specific waypoint ("Rally Waypoint") but it may not end up
+            // as a strong hint unless we extract and boost it directly.
+            var locSection = TryGetSection(pruned, "Location");
+            foreach (var wp in ExtractWaypointLinksFromText(locSection))
+            {
+                hints.Add(new LocationHint
+                {
+                    Text = wp,
+                    Weight = 420,
+                    ScopeMap = null,
+                    Source = "Section:Location:WaypointLink"
+                });
+            }
+
+
+            // 4/ lead "found in ..." phrases (moderate)
+            var lead = ExtractLeadSentenceLocation(pruned);
+            for (int i = 0; i < lead.Count; i++)
+                hints.Add(new LocationHint { Text = lead[i], Weight = 150, ScopeMap = null, Source = "Lead" });
+
+            // 5/ plain phrases (weak)
+            var phrases = ExtractPlainLocationPhrases(pruned);
+            for (int i = 0; i < phrases.Count; i++)
+                hints.Add(new LocationHint { Text = phrases[i], Weight = 120, ScopeMap = null, Source = "Phrases" });
+
+            // 6/ all links (weakest)
+            var allLinks = ExtractAllLinks(pruned);
+            for (int i = 0; i < allLinks.Count; i++)
+                hints.Add(new LocationHint { Text = allLinks[i], Weight = 40, ScopeMap = null, Source = "AllLinks" });
+
+            // clean + dedupe (keep strongest weight)
+            var dict = new Dictionary<string, LocationHint>(StringComparer.OrdinalIgnoreCase);
+
+            for (int i = 0; i < hints.Count; i++)
+            {
+                var h = hints[i];
+                if (h == null) continue;
+
+                h.Text = CleanHint(h.Text);
+                h.ScopeMap = CleanHint(h.ScopeMap);
+
+                if (string.IsNullOrWhiteSpace(h.Text)) continue;
+                if (h.Text.Length < 3 || h.Text.Length > 80) continue;
+
+                // drop language links etc
+                if (Regex.IsMatch(h.Text, @"^[a-z]{2}:", RegexOptions.IgnoreCase)) continue;
+
+                // key should include scope (since "Fort Marriner" under one map differs from another map)
+                string k = (h.ScopeMap ?? "") + "||" + h.Text;
+
+                if (!dict.TryGetValue(k, out var existing))
+                {
+                    dict[k] = h;
+                }
+                else
+                {
+                    if (h.Weight > existing.Weight)
+                        dict[k] = h;
+                }
+            }
+
+            var final = dict.Values
+                .OrderByDescending(x => x.Weight)
+                .ThenBy(x => x.Text, StringComparer.OrdinalIgnoreCase)
+                .Take(220)
+                .ToList();
 
             return final;
         }
+
+        private static string StripSection(string wikitext, string sectionTitle)
+        {
+            if (string.IsNullOrWhiteSpace(wikitext) || string.IsNullOrWhiteSpace(sectionTitle))
+                return wikitext;
+
+            // remove "== Historical locations ==" ... until next "=="
+            var rx = new Regex(@"==\s*" + Regex.Escape(sectionTitle) + @"\s*==(.+?)(?:(\r?\n)==|$)",
+                RegexOptions.Singleline | RegexOptions.IgnoreCase);
+
+            return rx.Replace(wikitext, "\n");
+        }
+
+
+        private List<(string map, string place)> ExtractLocationsTree(string wikitext)
+        {
+            var res = new List<(string map, string place)>();
+            if (string.IsNullOrWhiteSpace(wikitext)) return res;
+
+            string section = TryGetSection(wikitext, "Locations") ?? wikitext;
+            var lines = section.Split(new[] { "\r\n", "\n" }, StringSplitOptions.None);
+
+            // detect max bullet depth used
+            int maxDepth = 0;
+            for (int i = 0; i < lines.Length; i++)
+            {
+                var mm = Regex.Match(lines[i] ?? "", @"^\s*(?<bul>[\*\#]+)\s*(?<rest>.+)$");
+                if (!mm.Success) continue;
+                maxDepth = Math.Max(maxDepth, mm.Groups["bul"].Value.Length);
+            }
+
+            bool regionMode = maxDepth >= 3;
+
+            string region = null;
+            string map = null;
+
+            for (int i = 0; i < lines.Length; i++)
+            {
+                var line = lines[i];
+                if (string.IsNullOrWhiteSpace(line)) continue;
+
+                var mm = Regex.Match(line, @"^\s*(?<bul>[\*\#]+)\s*(?<rest>.+)$");
+                if (!mm.Success) continue;
+
+                int depth = mm.Groups["bul"].Value.Length;
+                string content = mm.Groups["rest"].Value;
+
+                string text = ExtractFirstLinkText(content);
+                if (string.IsNullOrWhiteSpace(text))
+                    text = StripWikiMarkup(content);
+
+                text = CleanHint(text);
+                if (string.IsNullOrWhiteSpace(text)) continue;
+
+                if (!regionMode)
+                {
+                    // 2-level mode:
+                    // * map
+                    // ** place
+                    if (depth == 1)
+                    {
+                        map = text;
+                        res.Add((map, null));
+                    }
+                    else if (depth >= 2)
+                    {
+                        if (!string.IsNullOrWhiteSpace(map))
+                            res.Add((map, text));
+                    }
+                }
+                else
+                {
+                    // 3-level mode:
+                    // * region
+                    // ** map
+                    // *** place
+                    if (depth == 1)
+                    {
+                        region = text;
+                        map = null;
+                    }
+                    else if (depth == 2)
+                    {
+                        map = text;
+                        res.Add((map, null));
+                    }
+                    else if (depth >= 3)
+                    {
+                        if (!string.IsNullOrWhiteSpace(map))
+                            res.Add((map, text));
+                        else if (!string.IsNullOrWhiteSpace(region))
+                            res.Add((region, text));
+                    }
+                }
+            }
+
+            return Dedup(res);
+
+            string ExtractFirstLinkText(string s)
+            {
+                var m = Regex.Match(s, @"\[\[(?<t>[^\]|#]+)(?:#[^\]|]+)?(?:\|(?<d>[^\]]+))?\]\]");
+                if (!m.Success) return null;
+                var d = m.Groups["d"].Success ? m.Groups["d"].Value : null;
+                var t = m.Groups["t"].Success ? m.Groups["t"].Value : null;
+                return (d ?? t ?? "").Trim();
+            }
+
+            string StripWikiMarkup(string s)
+            {
+                s = Regex.Replace(s, @"\{\{.*?\}\}", "", RegexOptions.Singleline);
+                s = Regex.Replace(s, @"\[\[|\]\]", "");
+                return s.Trim();
+            }
+
+            string TryGetSection(string all, string header)
+            {
+                var rx = new Regex(
+                    @"(?is)^\s*==+\s*" + Regex.Escape(header) + @"\s*==+\s*(?<body>.*?)(^\s*==+|\z)",
+                    RegexOptions.Multiline);
+
+                var m = rx.Match(all);
+                if (!m.Success) return null;
+                return m.Groups["body"].Value;
+            }
+
+            List<(string map, string place)> Dedup(List<(string map, string place)> list)
+            {
+                var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                var outList = new List<(string map, string place)>();
+                for (int k = 0; k < list.Count; k++)
+                {
+                    string m = CleanHint(list[k].map);
+                    string p = CleanHint(list[k].place);
+                    string key = (m ?? "") + "||" + (p ?? "");
+                    if (seen.Add(key))
+                        outList.Add((m, p));
+                }
+                return outList;
+            }
+        }
+
+
+
+        // ---------------------- i kept the older helpers ----------------------
 
         private List<string> ExtractAllLinks(string wikitext)
         {
@@ -690,17 +1387,19 @@ namespace NpcFinder.Services
             {
                 foreach (var k in keys)
                 {
-                    var rx = new Regex(@"\|\s*" + Regex.Escape(k) + @"\s*=\s*([^\r\n\|]+)", RegexOptions.IgnoreCase);
+                    var rx = new Regex(@"\|\s*" + Regex.Escape(k) + @"\s*=\s*(?<v>[^\r\n]+)",
+                                       RegexOptions.IgnoreCase);
                     var m = rx.Match(wikitext);
                     if (!m.Success) continue;
 
-                    var raw = m.Groups[1].Value.Trim();
+                    var raw = m.Groups["v"].Value.Trim();
+
+                    // keep '|' intact (we NEED it for split), but clean markup
                     raw = Regex.Replace(raw, @"\[\[([^\]\|]+)(\|[^\]]+)?\]\]", "$1");
                     raw = Regex.Replace(raw, @"<.*?>", "");
                     raw = Regex.Replace(raw, @"\{\{.*?\}\}", "", RegexOptions.Singleline);
 
-                    raw = raw.Split(new[] { "<br", "\n" }, StringSplitOptions.None)[0].Trim();
-
+                    // IMPORTANT: do NOT truncate at <br> — we need "(Crystal Oasis)" etc.
                     if (!string.IsNullOrWhiteSpace(raw))
                         return raw.Trim();
                 }
@@ -709,6 +1408,7 @@ namespace NpcFinder.Services
 
             return TryField("map", "location", "zone", "region", "area");
         }
+
 
         private List<string> SplitMapLikeString(string s)
         {
@@ -735,70 +1435,69 @@ namespace NpcFinder.Services
             s = s.Trim();
             s = Regex.Replace(s, @"\[\[([^\]\|]+)(\|[^\]]+)?\]\]", "$1").Trim();
             s = Regex.Replace(s, @"\{\{[^}]+\}\}", "").Trim();
+            s = Regex.Replace(s, @"<.*?>", "").Trim();
             s = s.Replace(";", "|");
-            return s;
+            return s.Trim();
         }
 
-        // ---------------------- SCORING (fallback only) ----------------------
+        // ---------------------- WEIGHTED SCORING ----------------------
 
-        private int ScoreCandidate(string candidateName, List<string> hints)
+        private int ScoreCandidateWeighted(string candidateName, List<LocationHint> hints, string currentMapName)
         {
             if (string.IsNullOrWhiteSpace(candidateName) || hints == null || hints.Count == 0) return 0;
 
-            string c = candidateName.Trim();
-            string cNorm = Normalize(c);
+            string cand = candidateName.Trim();
+            string candNorm = Normalize(cand);
 
             int score = 0;
-            if (cNorm.Contains("waypoint")) score += 60;
 
-            string[] localityKeywords = { "village of", "town of", "city of", "hamlet of", "outpost of", "settlement of" };
+            // waypoint bias
+            if (candNorm.Contains("waypoint")) score += 80;
+
+            // slight penalty for overly-generic candidates
+            // if (candNorm.StartsWith("old ")) score -= 30;
 
             for (int i = 0; i < hints.Count; i++)
             {
-                string hRaw = hints[i];
-                if (string.IsNullOrWhiteSpace(hRaw)) continue;
+                var h = hints[i];
+                if (h == null || string.IsNullOrWhiteSpace(h.Text)) continue;
 
-                string h = hRaw.Trim();
-                if (h.Length < 3) continue;
+                // scope: if hint is scoped to a map and it doesn't match this map -> downweight hard
+                bool scopeMismatch = !string.IsNullOrWhiteSpace(h.ScopeMap)
+                                     && !string.Equals(h.ScopeMap, currentMapName, StringComparison.OrdinalIgnoreCase);
 
-                int colon = h.IndexOf(':');
-                if (colon > 0 && colon <= 3) continue;
+                int w = h.Weight;
+                if (scopeMismatch) w = (int)(w * 0.15);
 
-                string hNorm = Normalize(h);
+                string hNorm = Normalize(h.Text);
 
+                if (hNorm.Length < 3) continue;
                 if (hNorm == "the" || hNorm == "merchant" || hNorm == "npc") continue;
 
-                if (string.Equals(cNorm, hNorm, StringComparison.OrdinalIgnoreCase))
+                // exact / contains matches
+                if (string.Equals(candNorm, hNorm, StringComparison.OrdinalIgnoreCase))
                 {
-                    score += 220;
+                    score += w;
                     continue;
                 }
 
-                if (cNorm.Contains(hNorm) || hNorm.Contains(cNorm))
-                    score += 120;
+                if (candNorm.Contains(hNorm) || hNorm.Contains(candNorm))
+                    score += (int)(w * 0.55);
 
-                for (int k = 0; k < localityKeywords.Length; k++)
-                {
-                    string key = localityKeywords[k];
-                    if (hNorm.StartsWith(key))
-                    {
-                        string core = hNorm.Substring(key.Length).Trim();
-                        if (core.Length >= 3 && (cNorm.Contains(core) || core.Contains(cNorm)))
-                            score += 220;
-                    }
-                }
-
-                var cTokens = Tokenize(cNorm);
+                // token overlap
+                var cTokens = Tokenize(candNorm);
                 var hTokens = Tokenize(hNorm);
 
                 int overlap = 0;
                 foreach (var token in hTokens)
                     if (cTokens.Contains(token)) overlap++;
 
-                score += overlap * 25;
+                if (overlap > 0)
+                    score += overlap * Math.Max(12, (int)(w * 0.06));
             }
 
-            if (c.IndexOf("Waypoint", StringComparison.OrdinalIgnoreCase) >= 0) score += 20;
+            // ensure non-negative
+            if (score < 0) score = 0;
             return score;
 
             string Normalize(string s)
@@ -825,6 +1524,50 @@ namespace NpcFinder.Services
                 }
                 return set;
             }
+        }
+
+
+        private static bool ContainsAny(string text, List<string> terms)
+        {
+            if (string.IsNullOrWhiteSpace(text) || terms == null || terms.Count == 0) return false;
+
+            string norm = NormalizeForContains(text);
+
+            for (int i = 0; i < terms.Count; i++)
+            {
+                var t = terms[i];
+                if (string.IsNullOrWhiteSpace(t)) continue;
+
+                string tn = NormalizeForContains(t);
+                if (tn.Length < 3) continue;
+
+                if (norm.Contains(tn))
+                    return true;
+            }
+
+            return false;
+        }
+
+        private static string NormalizeForContains(string s)
+        {
+            s = (s ?? "").Trim().ToLowerInvariant();
+            s = Regex.Replace(s, @"[^\p{L}\p{Nd}\s]+", " ");
+            s = Regex.Replace(s, @"\s+", " ").Trim();
+            return s;
+        }
+
+
+
+        private static bool IsOldPrefixed(string name)
+        {
+            if (string.IsNullOrWhiteSpace(name)) return false;
+            return name.TrimStart().StartsWith("Old ", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static bool IsMemoryMapName(string mapName)
+        {
+            if (string.IsNullOrWhiteSpace(mapName)) return false;
+            return mapName.TrimStart().StartsWith("Memory of", StringComparison.OrdinalIgnoreCase);
         }
     }
 }

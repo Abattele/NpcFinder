@@ -12,12 +12,18 @@ namespace NpcFinder.Util
     public class BigMapOverlayControl : Control
     {
 
+
+        private static readonly bool DEBUG_LOGS = false;
+
+
+
         private Texture2D _pixel;
         public Func<NpcTarget> TargetProvider;
         public Func<int> CurrentContinentIdProvider;
         private static readonly Blish_HUD.Logger Log = Blish_HUD.Logger.GetLogger<BigMapOverlayControl>();
         private int _dbgEvery = 0;
         private static DateTime _lastLog = DateTime.MinValue;
+
 
         public BigMapOverlayControl()
         {
@@ -55,56 +61,6 @@ namespace NpcFinder.Util
 
             return new Vector2(px, py);
         }
-
-
-        protected override void Paint(SpriteBatch spriteBatch, Rectangle bounds)
-        {
-            var tp = TargetProvider;
-            if (tp == null) return;
-
-            NpcTarget target;
-            try { target = tp(); } catch { return; }
-            if (target == null) return;
-
-            // Gate by continent
-            if (CurrentContinentIdProvider != null)
-            {
-                var curCont = CurrentContinentIdProvider();
-                if (curCont != 0 && target.TargetContinentId != 0 && curCont != target.TargetContinentId)
-                    return;
-            }
-
-            // Only draw when big map opens (prevents random transforms otherwise)
-            if (!(GameService.Gw2Mumble?.UI?.IsMapOpen ?? false))
-                return;
-
-            var screenPos = ContinentToScreen(target.TargetContinentX, target.TargetContinentY, bounds);
-            if (!screenPos.HasValue) return;
-
-            var pos = screenPos.Value;
-            float centerX, centerY, scale;
-            if (!MumbleReader.TryGetWorldMapUi(out centerX, out centerY, out scale)) return;
-
-            if ((_dbgEvery++ % 60) == 0)
-            {
-                Log.Warn($"[OverlayDbg] center=({centerX},{centerY}) scale={scale} " +
-                         $"target=({target.TargetContinentX},{target.TargetContinentY}) " +
-                         $"dxdy=({(float)target.TargetContinentX - centerX},{(float)target.TargetContinentY - centerY}) " +
-                         $"screen=({pos.X},{pos.Y})");
-            }
-
-
-            if (_pixel == null)
-            {
-                _pixel = new Texture2D(spriteBatch.GraphicsDevice, 1, 1);
-                _pixel.SetData(new[] { Color.White });
-            }
-
-            DrawRing(spriteBatch, pos, 22f, 3f, Color.Yellow);
-            DrawCross(spriteBatch, pos, 10f, 2f, Color.Yellow);
-        }
-
-
 
         private void DrawRing(SpriteBatch sb, Vector2 center, float radius, float thickness, Color color)
         {
@@ -151,56 +107,117 @@ namespace NpcFinder.Util
 
         // ----- helpers and misc methods ----- //
 
-
-        // no longer using this method, but i'm leaving it here for reference if i ever want to switch back... might use it for minimap overlay later
-        private static bool ContinentToMap(NpcTarget target, out float mapX, out float mapY)
+        private static Vector2 ClampToBounds(Vector2 p, Rectangle b, float margin)
         {
-            mapX = mapY = 0;
-            var mi = target?.MapInfo;
-            if (mi == null) return false;
+            float x = MathHelper.Clamp(p.X, b.Left + margin, b.Right - margin);
+            float y = MathHelper.Clamp(p.Y, b.Top + margin, b.Bottom - margin);
+            return new Vector2(x, y);
+        }
 
-            var mr = mi.MapRect;
-            var cr = mi.ContinentRect;
+        private void DrawArrow(SpriteBatch sb, Vector2 tip, Vector2 dir, float size, float thickness, Color color)
+        {
+            // V-shaped arrow head
+            // tip = where arrow points, dir = direction toward target
+            var left = Rotate(dir, +2.6f);   // ~150 dgrs
+            var right = Rotate(dir, -2.6f);
 
-            double cMinX = Math.Min(cr.X1, cr.X2);
-            double cMaxX = Math.Max(cr.X1, cr.X2);
-            double cMinY = Math.Min(cr.Y1, cr.Y2);
-            double cMaxY = Math.Max(cr.Y1, cr.Y2);
+            var a = tip - left * size;
+            var b = tip - right * size;
 
-            double mMinX = Math.Min(mr.X1, mr.X2);
-            double mMaxX = Math.Max(mr.X1, mr.X2);
-            double mMinY = Math.Min(mr.Y1, mr.Y2);
-            double mMaxY = Math.Max(mr.Y1, mr.Y2);
+            DrawLine(sb, a, tip, thickness, color);
+            DrawLine(sb, b, tip, thickness, color);
+        }
 
-            double cW = (cMaxX - cMinX);
-            double cH = (cMaxY - cMinY);
-            double mW = (mMaxX - mMinX);
-            double mH = (mMaxY - mMinY);
+        private static Vector2 Rotate(Vector2 v, float radians)
+        {
+            float c = (float)Math.Cos(radians);
+            float s = (float)Math.Sin(radians);
+            return new Vector2(v.X * c - v.Y * s, v.X * s + v.Y * c);
+        }
 
-            if (cW <= 0.000001 || cH <= 0.000001 || mW <= 0.000001 || mH <= 0.000001)
-                return false;
+        protected override void Paint(SpriteBatch spriteBatch, Rectangle bounds)
+        {
 
-            // normalized in continent rect
-            double u = (target.TargetContinentX - cMinX) / cW;
-            double v = (target.TargetContinentY - cMinY) / cH;
+            // only draw when big map is open
+            if (!(GameService.Gw2Mumble?.UI?.IsMapOpen ?? false))
+                return;
 
-            u = Math.Max(0, Math.Min(1, u));
-            v = Math.Max(0, Math.Min(1, v));
-            v = 1.0 - v;
+            var tp = TargetProvider;
+            if (tp == null) return;
 
-            mapX = (float)(mMinX + u * mW);
-            mapY = (float)(mMinY + v * mH);
-            return true;
+            NpcTarget target;
+            try { target = tp(); } catch { return; }
+            if (target == null) return;
+
+            // gate by continent
+            if (CurrentContinentIdProvider != null)
+            {
+                var curCont = CurrentContinentIdProvider();
+                if (curCont != 0 && target.TargetContinentId != 0 && curCont != target.TargetContinentId)
+                    return;
+            }
+
+            // need current Mumble map center/scale
+            float centerX, centerY, scale;
+            if (!MumbleReader.TryGetWorldMapUi(out centerX, out centerY, out scale))
+                return;
+
+            if (float.IsNaN(scale) || float.IsInfinity(scale) || Math.Abs(scale) < 1e-6f)
+                return;
+
+            // convert to screen
+            var screenPos = ContinentToScreen(target.TargetContinentX, target.TargetContinentY, bounds);
+            if (!screenPos.HasValue) return;
+
+            var pos = screenPos.Value;
+
+
+            if ((_dbgEvery++ % 60) == 0 && DEBUG_LOGS)
+            {
+                Log.Warn($"[OverlayDbg] center=({centerX},{centerY}) scale={scale} " +
+                         $"target=({target.TargetContinentX},{target.TargetContinentY}) " +
+                         $"dxdy=({(float)target.TargetContinentX - centerX},{(float)target.TargetContinentY - centerY}) " +
+                         $"screen=({pos.X},{pos.Y})");
+            }
+
+            // ensure pixel texture exists
+            if (_pixel == null)
+            {
+                _pixel = new Texture2D(spriteBatch.GraphicsDevice, 1, 1);
+                _pixel.SetData(new[] { Color.White });
+            }
+
+            // if offscreen -> clamp to edge and draw an arrow toward target
+            const float margin = 18f;
+
+            bool offscreen = (pos.X < bounds.Left + margin) || (pos.X > bounds.Right - margin) ||
+                             (pos.Y < bounds.Top + margin) || (pos.Y > bounds.Bottom - margin);
+
+            if (offscreen)
+            {
+                var clamped = ClampToBounds(pos, bounds, margin);
+
+                // direction from map center (screen center) to target screen position
+                var mapCenter = new Vector2(bounds.X + bounds.Width / 2f, bounds.Y + bounds.Height / 2f);
+                var dir = pos - mapCenter;
+
+                if (dir.LengthSquared() < 0.001f)
+                    dir = new Vector2(1, 0);
+                else
+                    dir.Normalize();
+
+                // edge indicator
+                DrawRing(spriteBatch, clamped, 18f, 3f, Color.Yellow);
+                DrawArrow(spriteBatch, clamped, dir, 16f, 3f, Color.Yellow);
+
+                return;
+            }
+
+            // normal onscreen draw
+            DrawRing(spriteBatch, pos, 22f, 3f, Color.Yellow);
+            DrawCross(spriteBatch, pos, 10f, 2f, Color.Yellow);
         }
 
 
-        // log method, using another dump now
-        private static void LogOncePerSecond(Logger log, string msg)
-        {
-            var now = DateTime.UtcNow;
-            if ((now - _lastLog).TotalSeconds < 1) return;
-            _lastLog = now;
-            log.Warn(msg);
-        }
     }
 }

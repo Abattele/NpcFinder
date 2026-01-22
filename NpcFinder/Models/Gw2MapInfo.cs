@@ -10,6 +10,9 @@ namespace NpcFinder.Models
 
         public int ContinentId { get; set; }
         public int DefaultFloor { get; set; }
+
+        public int RegionId { get; set; }
+
         public int[] Floors { get; set; } = Array.Empty<int>();
 
         public Rect2D MapRect { get; set; }
@@ -24,4 +27,7 @@ namespace NpcFinder.Models
             X1 = x1; Y1 = y1; X2 = x2; Y2 = y2;
         }
     }
+
+
+
 }
