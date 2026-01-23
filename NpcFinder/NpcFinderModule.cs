@@ -59,7 +59,7 @@ namespace NpcFinder
 
 @"
 v1.2.0
-- Added search by MAP feature
+- Added search by MAP feature (it is possible not all NPCs of that map will show)
 - Optimized NPC search (now takes around 5-10 seconds max to find most NPCs)
 - Fixed marker jitter
 - Safety improvements
