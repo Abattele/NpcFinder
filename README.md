@@ -31,7 +31,7 @@
    
 ## Future plans
 - Add support for the minimap
-- Add support for dynamic path finding on the world map, though that would be very difficult because on-map coordinates != real world coordinates -> would need to apply a cartesian transform then to treat it as graphs for shortest achievable path (maybe use Dijkstra algorithm for that? i need a valid mesh dataset though)... so this feature won't be implemented/available anytime soon... -> after careful analysis, I think I would do a real-time compass (with an arrow indicating the right location) around the character, because a path real trail would be too difficult.
+- Add support for dynamic path finding on the world map, though that would be very difficult because on-map coordinates != real world coordinates -> would need to apply a cartesian transform then to treat it as graphs for shortest achievable path (maybe use Dijkstra algorithm for that? i need a valid mesh dataset though)... so this feature won't be implemented/available anytime soon... -> after careful analysis, I think I would do a real-time compass (with an arrow indicating the right location) around the character, because a real trail of the correct path would be too difficult.
 
 ## Installation
 1. Install **Blish HUD**
