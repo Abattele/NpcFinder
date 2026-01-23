@@ -2,6 +2,14 @@
 
 **NPC Finder** is a Blish HUD module for *Guild Wars 2* that lets you search for NPCs (and other wiki objects) and displays their location directly on the in-game world map.
 
+## V1.2.0
+- Added search by MAP feature
+- Optimized NPC search (now takes around 5-10 seconds max to find most NPCs)
+- Fixed marker jitter
+- Safety improvements
+- UI improvements (+changelog)
+- Increase cache size limits (stored up to 25 days)
+
 ## V1.1.0
 - Huge performance increase (worst case scenario takes around 3 minutes)
 - Huge precision increase (now works for most NPCs)
