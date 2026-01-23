@@ -42,11 +42,33 @@ namespace NpcFinder
 
 
 
-
-
         private ChangelogWindow _changelogWindow;
-        private const string CHANGELOG_TEXT =
-        @"v1.1.0
+
+
+        private static readonly string[] CHANGELOG_PAGE_TITLES =
+        {
+            "Latest (v1.2.0)",
+            "v1.1.0",
+            "v1.0.0"
+        };
+
+
+        // i need to use @ for the text for the user so i can't make this identation uniform in the code...
+        private static readonly string[] CHANGELOG_PAGE_TEXTS =
+        {
+
+@"
+v1.2.0
+- Added search by MAP feature
+- Optimized NPC search (now takes around 5-10 seconds max to find most NPCs)
+- Fixed marker jitter
+- Safety improvements
+- UI improvements (+changelog)
+- Increase cache size limits (stored up to 25 days)
+",
+
+@"
+v1.1.0
 - Huge performance improvements
 - Much better precision (works for most of the NPCs now)
 - Added Suggestions panel
@@ -60,13 +82,23 @@ namespace NpcFinder
 
 ! Some NPCs may take a bit longer to resolve the position the first time 
 (due to caching) -> be patient (around max 2-3 minutes)
-
+            
 ** For the next version (v1.2.0) I'm planning to add a feature to search by MAP 
 and to display all the NPCs on that map ** 
-
+            
 ** Also I will try to fix the small offset of the marker when moving the map 
 in the next version **
-";
+",
+            
+            
+@"
+v1.0.0
+- Initial release
+- Basic NPC search + marker
+"
+
+        };
+
 
 
 
@@ -165,7 +197,7 @@ in the next version **
             if (_changelogWindow != null) return;
 
             var bg = AsyncTexture2D.FromAssetId(155997);
-            _changelogWindow = new ChangelogWindow(bg, CHANGELOG_TEXT)
+            _changelogWindow = new ChangelogWindow(bg, CHANGELOG_PAGE_TEXTS, CHANGELOG_PAGE_TITLES)
             {
                 Parent = GameService.Graphics.SpriteScreen,
                 Location = new Point(340, 240),

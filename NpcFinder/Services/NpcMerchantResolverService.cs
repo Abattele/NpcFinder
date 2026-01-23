@@ -34,7 +34,7 @@ namespace NpcFinder.Services
 
 
         // tweak how long to trust cached results
-        private static readonly TimeSpan CacheTtl = TimeSpan.FromDays(14);
+        private static readonly TimeSpan CacheTtl = TimeSpan.FromDays(25); // made this 25 days
 
         // ---------------------- inline classes ----------------------
 
@@ -1526,7 +1526,6 @@ namespace NpcFinder.Services
             }
         }
 
-
         private static bool ContainsAny(string text, List<string> terms)
         {
             if (string.IsNullOrWhiteSpace(text) || terms == null || terms.Count == 0) return false;
@@ -1555,8 +1554,6 @@ namespace NpcFinder.Services
             s = Regex.Replace(s, @"\s+", " ").Trim();
             return s;
         }
-
-
 
         private static bool IsOldPrefixed(string name)
         {

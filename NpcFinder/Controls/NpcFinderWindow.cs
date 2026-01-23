@@ -20,6 +20,10 @@ namespace NpcFinder.Controls
         private static readonly bool DEBUG_LOGS = false;
 
 
+        // map mode
+        const int MAX_MAP_RESULTS = 120;
+        private Checkbox _mapModeCheckbox;
+        private bool _mapMode;
 
         private CancellationToken _activeSearchToken;
         private FlowPanel _suggestPanel;
@@ -48,6 +52,7 @@ namespace NpcFinder.Controls
         private StandardButton _searchBtn;
         private FlowPanel _resultsPanel;
         private Label _status;
+        private Label _changeLog;
 
         private StandardButton _clearBtn;
         private readonly Action _clearTarget;
@@ -199,8 +204,19 @@ namespace NpcFinder.Controls
             return _suggestCts.Token;
         }
 
-        private async Task<List<(string label, string value)>> BuildMergedSuggestionsAsync(string text, CancellationToken ct)
+        private async Task<List<(string label, string value)>> BuildMergedSuggestionsAsync(string text, bool mapMode, CancellationToken ct)
         {
+
+            if (mapMode)
+            {
+                var maps = await _mapIndex.SuggestMapNamesAsync(text, 12, ct).ConfigureAwait(false);
+                return (maps ?? new List<string>())
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .Take(MaxSuggestButtons)
+                    .Select(m => (label: m, value: m))
+                    .ToList();
+            }
+
             // 1/ maps
             var mapTask = _mapIndex.SuggestMapNamesAsync(text, 6, ct);
 
@@ -292,7 +308,8 @@ namespace NpcFinder.Controls
                 }
 
                 // multi-suggestions (maps + wiki)
-                var merged = await BuildMergedSuggestionsAsync(q, ct);
+                //var merged = await BuildMergedSuggestionsAsync(q, ct);
+                var merged = await BuildMergedSuggestionsAsync(q, _mapMode, ct);
                 ct.ThrowIfCancellationRequested();
 
                 if (myId != _suggestReqId) return;
@@ -331,18 +348,44 @@ namespace NpcFinder.Controls
             {
                 Parent = this,
                 Location = new Point(40, 40),
-                Size = new Point(520, 400),
+                Size = new Point(520, 450),
                 ClipsBounds = false
             };
 
             const int pad = 10;
+
+            _mapModeCheckbox = new Checkbox()
+            {
+                Parent = _contentRoot,
+                Location = new Point(350, 50), // sits above the search box
+                Size = new Point(260, 20),
+                Text = "Map mode ?",
+                Checked = false
+            };
+
+            _mapModeCheckbox.CheckedChanged += (s, e) =>
+            {
+                _mapMode = _mapModeCheckbox.Checked;
+
+                // reset UI
+                _resultsPanel.ClearChildren();
+                HideSuggestions();
+
+                _searchBox.Text = "";
+                _searchBox.PlaceholderText = _mapMode ? "Map name..." : "NPC/WP/POI name...";
+
+                _status.Text = _mapMode
+                    ? "Map mode: type a map name, then Search to list NPCs."
+                    : "Awaiting NPC selection from the list below...";
+            };
+
 
             _searchBox = new TextBox()
             {
                 Parent = _contentRoot,
                 Location = new Point(0, 0),
                 Width = cr.Width - pad * 3 - 110,
-                PlaceholderText = "NPC name..."
+                PlaceholderText = "NPC/WP/POI name..."
             };
 
 
@@ -471,7 +514,14 @@ namespace NpcFinder.Controls
                     _status.Text = "Cache delete failed: " + ex.Message;
                 }
             };
-            
+
+            _changeLog = new Label()
+            {
+                Parent = _contentRoot,
+                Location = new Point(50, 410),
+                AutoSizeWidth = true,
+                Text = "For more info check the changelog (right click the addon)"
+            };
 
             _searchBox.TextChanged += (s, e) => { _ = UpdateSuggestionsAsync(); };
         }
@@ -514,12 +564,11 @@ namespace NpcFinder.Controls
 
                 int cur = _currentContinentIdProvider != null ? _currentContinentIdProvider() : 0;
                 if (cur != 0 && target.TargetContinentId != 0 && cur != target.TargetContinentId)
-                    _status.Text = $"You are on {ContinentNames.Name(cur)}; target is on {ContinentNames.Name(target.TargetContinentId)}.";
+                    _status.Text = $"You are on {ContinentNames.Name(cur)}. Target is on {ContinentNames.Name(target.TargetContinentId)}. Teleport continents.";
                 else
                     _status.Text = $"Marker set ({r.Source}). Open world map.";
             };
         }
-
 
         private async Task<Gw2MapInfo> ResolveMapInfoByContinentPointAsync(int cx, int cy, CancellationToken ct)
         {
@@ -528,58 +577,20 @@ namespace NpcFinder.Controls
             if (_continentPointMemo.TryGetValue(key, out var memo) && memo != null)
                 return memo;
 
-            var allMapIds = await _mapIndex.GetAllKnownMapIdsAsync(ct).ConfigureAwait(false);
-            if (allMapIds == null || allMapIds.Count == 0) return null;
-
             int curCont = _currentContinentIdProvider != null ? _currentContinentIdProvider() : 0;
 
-            bool Contains(Gw2MapInfo mi)
-            {
-                double minX = Math.Min(mi.ContinentRect.X1, mi.ContinentRect.X2);
-                double maxX = Math.Max(mi.ContinentRect.X1, mi.ContinentRect.X2);
-                double minY = Math.Min(mi.ContinentRect.Y1, mi.ContinentRect.Y2);
-                double maxY = Math.Max(mi.ContinentRect.Y1, mi.ContinentRect.Y2);
-                return (cx >= minX && cx <= maxX && cy >= minY && cy <= maxY);
-            }
+            // rectangle index lookup (no more looping over all maps)
+            var mapId = await _mapIndex.FindMapIdByContinentPointAsync(cx, cy, curCont, ct).ConfigureAwait(false);
+            if (!mapId.HasValue)
+                return null;
 
-            // 1/ current continent first
-            if (curCont != 0)
-            {
-                for (int i = 0; i < allMapIds.Count; i++)
-                {
-                    ct.ThrowIfCancellationRequested();
-                    if ((i % 20) == 0) await Task.Yield(); // keep GW2/Blish responsive
+            // just 1 call to get details (cached after first time)
+            var mi = await _gw2.GetMapInfoAsync(mapId.Value, ct).ConfigureAwait(false);
+            if (mi != null)
+                _continentPointMemo[key] = mi;
 
-                    var mi = await _gw2.GetMapInfoAsync(allMapIds[i], ct).ConfigureAwait(false);
-                    if (mi == null) continue;
-                    if (mi.ContinentId != curCont) continue;
-
-                    if (Contains(mi))
-                    {
-                        _continentPointMemo[key] = mi;
-                        return mi;
-                    }
-                }
-            }
-
-            // 2/ any continent
-            for (int i = 0; i < allMapIds.Count; i++)
-            {
-                ct.ThrowIfCancellationRequested();
-                if ((i % 20) == 0) await Task.Yield(); // keep GW2/Blish responsive
-
-                var mi = await _gw2.GetMapInfoAsync(allMapIds[i], ct).ConfigureAwait(false);
-                if (mi == null) continue;
-
-                if (Contains(mi))
-                {
-                    _continentPointMemo[key] = mi;
-                    return mi;
-                }
-            }
-            return null;
+            return mi;
         }
-
 
         private async Task AddResolvedHitAsync(NpcCandidateHit h, CancellationToken ct)
         {
@@ -693,14 +704,64 @@ namespace NpcFinder.Controls
                 _setTarget?.Invoke(target);
 
                 if (curCont != 0 && target.TargetContinentId != 0 && curCont != target.TargetContinentId)
-                    _status.Text = $"You are on {ContinentNames.Name(curCont)}. Target is on {ContinentNames.Name(target.TargetContinentId)}. Teleport there, then open map.";
+                    _status.Text = $"You are on {ContinentNames.Name(curCont)}. Target is on {ContinentNames.Name(target.TargetContinentId)}. Teleport continents.";
                 else
                     _status.Text = $"Marker set. Open world map.";
             };
         }
 
+        // for map mode
+        private async Task DoMapSearchAsync(string mapName)
+        {
+            await _searchGate.WaitAsync();
+            try
+            {
+                var ct = BeginNewSearchToken();
 
+                _searchBtn.Enabled = false;
+                _searchBox.Enabled = false;
 
+                _resultsPanel.ClearChildren();
+                _status.Text = "Searching NPCs on that map...";
+
+                // resolve map name -> mapId
+                var mapId = await _mapIndex.ResolveMapIdByNameAsync(mapName, ct).ConfigureAwait(false);
+                if (mapId == null || mapId.Value <= 0)
+                {
+                    _status.Text = "Map not recognized. Pick one from suggestions.";
+                    return;
+                }
+
+                // fetch titles
+                var titles = await _wiki.SearchNpcTitlesByMapAsync(mapName, MAX_MAP_RESULTS, ct).ConfigureAwait(false);
+
+                if (titles == null || titles.Count == 0)
+                {
+                    _status.Text = "No NPC pages found for that map (wiki search came back empty).";
+                    return;
+                }
+
+                _status.Text = $"Found {titles.Count} NPCs. Click one to resolve location.";
+                foreach (var t in titles)
+                    AddTitleChoice(t);
+            }
+            catch (OperationCanceledException)
+            {
+                _status.Text = "Cancelled.";
+            }
+            catch (Exception ex)
+            {
+                _status.Text = "Error: " + ex.Message;
+            }
+            finally
+            {
+                _searchBtn.Enabled = true;
+                _searchBox.Enabled = true;
+                _searchGate.Release();
+            }
+        }
+
+        // for npc mode (non-map search)
         private async Task DoSearchAsync()
         {
 
@@ -709,6 +770,13 @@ namespace NpcFinder.Controls
 
             string q = (_searchBox.Text ?? "").Trim();
             if (q.Length == 0) return;
+
+            if (_mapMode)
+            {
+                await DoMapSearchAsync(q);
+                return;
+            }
+
 
             await _searchGate.WaitAsync(); // UI thread
             try
@@ -959,7 +1027,5 @@ namespace NpcFinder.Controls
 
             return mapInfo?.Id ?? mapId;
         }
-
-
     }
 }
