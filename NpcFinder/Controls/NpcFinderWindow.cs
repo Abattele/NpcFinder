@@ -101,48 +101,6 @@ namespace NpcFinder.Controls
 
         }
 
-
-
-        private static void MakeNonFocusable(object control)
-        {
-            if (control == null) return;
-
-            try
-            {
-                var t = control.GetType();
-                var flags = System.Reflection.BindingFlags.Instance |
-                            System.Reflection.BindingFlags.Public |
-                            System.Reflection.BindingFlags.NonPublic;
-
-                // try common focus properties across Blish builds
-                foreach (
-                    var propName in new[] {"CanFocus", "CanReceiveFocus", "IsFocusable", "Focusable","CanBeFocused", "CanTakeFocus"}
-                )
-                {
-                    var p = t.GetProperty(propName, flags);
-                    if (p != null && p.CanWrite && p.PropertyType == typeof(bool))
-                    {
-                        p.SetValue(control, false, null);
-                        break;
-                    }
-                }
-
-                // some builds use fields instead of properties
-                foreach (
-                    var fieldName in new[]{"CanFocus", "IsFocusable", "Focusable"}
-                )
-                {
-                    var f = t.GetField(fieldName, flags);
-                    if (f != null && f.FieldType == typeof(bool))
-                    {
-                        f.SetValue(control, false);
-                        break;
-                    }
-                }
-            }
-            catch { }
-        }
-
         private static string Norm(string s)
         {
             if (string.IsNullOrWhiteSpace(s)) return "";
@@ -417,7 +375,7 @@ namespace NpcFinder.Controls
                     Visible = false
                 };
 
-                MakeNonFocusable(b);
+                //MakeNonFocusable(b); //no longer needed
 
                 b.Click += async (s, e) =>
                 {
@@ -514,9 +472,6 @@ namespace NpcFinder.Controls
                 }
             };
             
-            MakeNonFocusable(_contentRoot);
-            MakeNonFocusable(_resultsViewport);
-            MakeNonFocusable(_resultsPanel);
 
             _searchBox.TextChanged += (s, e) => { _ = UpdateSuggestionsAsync(); };
         }
@@ -857,23 +812,8 @@ namespace NpcFinder.Controls
 
             try
             {
-                // most versions at least repaint
                 fp.Invalidate();
-
-                var flags = System.Reflection.BindingFlags.Instance |
-                            System.Reflection.BindingFlags.Public |
-                            System.Reflection.BindingFlags.NonPublic;
-
-                // different Blish versions use different method names
-                foreach (var name in new[] { "RecalculateLayout", "ReflowChildren", "UpdateLayout", "InvalidateLayout" })
-                {
-                    var m = fp.GetType().GetMethod(name, flags);
-                    if (m != null && m.GetParameters().Length == 0)
-                    {
-                        m.Invoke(fp, null);
-                        break;
-                    }
-                }
+                fp.RecalculateLayout();
             }
             catch
             {

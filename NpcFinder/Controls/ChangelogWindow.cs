@@ -17,7 +17,7 @@ namespace NpcFinder.Controls
                 new Rectangle(30, 20, 580, 550)
             )  
         {
-            Title = "NpcFinder - Changelog";
+            Title = "Abattele's NPC Finder - Changelog";
 
             CanResize = false;      
             SavesPosition = true;

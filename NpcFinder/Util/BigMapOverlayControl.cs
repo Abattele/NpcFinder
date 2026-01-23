@@ -39,14 +39,54 @@ namespace NpcFinder.Util
             return CaptureType.None;
         }
 
-        private Vector2? ContinentToScreen(double cx, double cy, Rectangle bounds)
+
+        private static float GetUiScaleMultiplier()
         {
-            float centerX, centerY, scale;
-            if (!MumbleReader.TryGetWorldMapUi(out centerX, out centerY, out scale))
+            try
+            {
+                object gfx = GameService.Graphics;
+                if (gfx == null) return 1f;
+
+                var t = gfx.GetType();
+
+                var p =
+                    t.GetProperty("UIScaleMultiplier") ??
+                    t.GetProperty("UiScaleMultiplier") ??
+                    t.GetProperty("ScaleMultiplier") ??
+                    t.GetProperty("UIScale") ??
+                    t.GetProperty("UiScale");
+
+                if (p == null) return 1f;
+
+                var v = p.GetValue(gfx);
+                if (v == null) return 1f;
+
+                if (v is float f) return f;
+                if (v is double d) return (float)d;
+
+                return Convert.ToSingle(v);
+            }
+            catch
+            {
+                return 1f;
+            }
+        }
+
+        private Vector2? ContinentToScreen(
+            double cx,
+            double cy,
+            Rectangle bounds,
+            float centerX,
+            float centerY,
+            float scale
+        )
+        {
+            if (float.IsNaN(scale) || float.IsInfinity(scale) || Math.Abs(scale) < 1e-6f)
                 return null;
 
-            if (Math.Abs(scale) < 1e-6f)
-                return null;
+            float uiMul = GetUiScaleMultiplier();
+            if (float.IsNaN(uiMul) || float.IsInfinity(uiMul) || uiMul <= 1e-6f)
+                uiMul = 1f;
 
             var mapPixelCenter = new Vector2(
                 bounds.X + bounds.Width / 2f,
@@ -56,11 +96,16 @@ namespace NpcFinder.Util
             float dx = (float)cx - centerX;
             float dy = (float)cy - centerY;
 
-            float px = mapPixelCenter.X + (dx / scale);
-            float py = mapPixelCenter.Y + (dy / scale); 
+            // correct space conversion
+            float px = mapPixelCenter.X + (dx / scale) / uiMul;
+            float py = mapPixelCenter.Y + (dy / scale) / uiMul;
+
+            if (float.IsNaN(px) || float.IsInfinity(px) || float.IsNaN(py) || float.IsInfinity(py))
+                return null;
 
             return new Vector2(px, py);
         }
+
 
         private void DrawRing(SpriteBatch sb, Vector2 center, float radius, float thickness, Color color)
         {
@@ -85,6 +130,7 @@ namespace NpcFinder.Util
             DrawLine(sb, new Vector2(c.X, c.Y - half), new Vector2(c.X, c.Y + half), thickness, color);
         }
 
+
         private void DrawLine(SpriteBatch sb, Vector2 start, Vector2 end, float thickness, Color color)
         {
             Vector2 edge = end - start;
@@ -93,16 +139,16 @@ namespace NpcFinder.Util
 
             sb.Draw(
                 _pixel,
-                new Rectangle((int)start.X, (int)start.Y, (int)length, (int)thickness),
+                start,
                 null,
                 color,
                 angle,
-                new Vector2(0, 0.5f),
+                new Vector2(0f, 0.5f),
+                new Vector2(length, thickness),
                 SpriteEffects.None,
                 0f
             );
         }
-
 
 
         // ----- helpers and misc methods ----- //
@@ -135,9 +181,9 @@ namespace NpcFinder.Util
             return new Vector2(v.X * c - v.Y * s, v.X * s + v.Y * c);
         }
 
+
         protected override void Paint(SpriteBatch spriteBatch, Rectangle bounds)
         {
-
             // only draw when big map is open
             if (!(GameService.Gw2Mumble?.UI?.IsMapOpen ?? false))
                 return;
@@ -165,11 +211,28 @@ namespace NpcFinder.Util
             if (float.IsNaN(scale) || float.IsInfinity(scale) || Math.Abs(scale) < 1e-6f)
                 return;
 
-            // convert to screen
-            var screenPos = ContinentToScreen(target.TargetContinentX, target.TargetContinentY, bounds);
-            if (!screenPos.HasValue) return;
+            // ensure pixel texture exists
+            if (_pixel == null)
+            {
+                _pixel = new Texture2D(spriteBatch.GraphicsDevice, 1, 1);
+                _pixel.SetData(new[] { Color.White });
+            }
 
-            var pos = screenPos.Value;
+
+            // convert to screen
+            var posOpt = ContinentToScreen(
+                target.TargetContinentX,
+                target.TargetContinentY,
+                bounds,
+                centerX,
+                centerY,
+                scale
+            );
+
+            if (!posOpt.HasValue)
+                return;
+
+            var pos = posOpt.Value;
 
 
             if ((_dbgEvery++ % 60) == 0 && DEBUG_LOGS)
@@ -178,13 +241,6 @@ namespace NpcFinder.Util
                          $"target=({target.TargetContinentX},{target.TargetContinentY}) " +
                          $"dxdy=({(float)target.TargetContinentX - centerX},{(float)target.TargetContinentY - centerY}) " +
                          $"screen=({pos.X},{pos.Y})");
-            }
-
-            // ensure pixel texture exists
-            if (_pixel == null)
-            {
-                _pixel = new Texture2D(spriteBatch.GraphicsDevice, 1, 1);
-                _pixel.SetData(new[] { Color.White });
             }
 
             // if offscreen -> clamp to edge and draw an arrow toward target
@@ -209,7 +265,6 @@ namespace NpcFinder.Util
                 // edge indicator
                 DrawRing(spriteBatch, clamped, 18f, 3f, Color.Yellow);
                 DrawArrow(spriteBatch, clamped, dir, 16f, 3f, Color.Yellow);
-
                 return;
             }
 
@@ -217,7 +272,6 @@ namespace NpcFinder.Util
             DrawRing(spriteBatch, pos, 22f, 3f, Color.Yellow);
             DrawCross(spriteBatch, pos, 10f, 2f, Color.Yellow);
         }
-
 
     }
 }

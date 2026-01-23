@@ -288,18 +288,15 @@ in the next version **
         {
             base.Update(gameTime);
 
-            // poll current map -> continent (for warning + overlay gating)
-            _pollMs += gameTime.ElapsedGameTime.TotalMilliseconds;
-            if (_pollMs < 1000) return;
-            _pollMs = 0;
-
-
-            // only repaint when map is open
-            if (GameService.Gw2Mumble.UI.IsMapOpen)
+            if (GameService.Gw2Mumble?.UI?.IsMapOpen ?? false)
             {
                 _bigMapOverlay?.Invalidate();
             }
 
+            // poll current map -> continent (for warning + overlay gating)
+            _pollMs += gameTime.ElapsedGameTime.TotalMilliseconds;
+            if (_pollMs < 1000) return;
+            _pollMs = 0;
 
             MumbleReader.DumpUiOncePerSecond(requireMapOpen: true);
 
