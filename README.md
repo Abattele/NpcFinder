@@ -2,6 +2,15 @@
 
 **NPC Finder** is a Blish HUD module for *Guild Wars 2* that lets you search for NPCs (and other wiki objects) and displays their location directly on the in-game world map.
 
+## V1.1.0
+- Huge performance increase (worst case scenario takes around 3 minutes)
+- Huge precision increase (now works for most NPCs)
+- A lot of bug fixes
+- Basically changed pretty much everything... Gave up on my first data model, now i'm using weighted decisional trees to optimally traverse and score the predictions.
+
+## V1.0.0
+- Initial release
+
 ## Features
 - Search NPCs by name using the GW2 Wiki
 - Place a marker on the world map
@@ -36,7 +45,7 @@
 - Results are cached locally to reduce wiki/API calls
 - Some NPCs may have multiple possible locations - if that's the case, I've implemented various fallbacks and I only retrieve the wiki coordinates for the right map. For any other maps that don't have wiki coordinates, it looks for the nearest Waypoint first.
 
-## 🛠️ Development
+## Development
 This project is built with:
 - C#
 - .NET
