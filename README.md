@@ -10,14 +10,28 @@
 - UI improvements (+changelog)
 - Increase cache size limits (stored up to 25 days)
 
+<img width="450" height="400" alt="image" src="https://github.com/user-attachments/assets/70d7c12e-a8d3-44c0-a6b2-1316fe7e4240" />
+<img width="450" height="400" alt="image" src="https://github.com/user-attachments/assets/edab6133-4c5b-42d7-b2f0-7a68c11f0d41" />
+
+
 ## V1.1.0
 - Huge performance increase (worst case scenario takes around 3 minutes)
 - Huge precision increase (now works for most NPCs)
 - A lot of bug fixes
 - Basically changed pretty much everything... Gave up on my first data model, now i'm using weighted decisional trees to optimally traverse and score the predictions.
-
+- Added changelog
+<img width="205" height="57" alt="image" src="https://github.com/user-attachments/assets/1a3c3369-6be5-4db3-a095-0aa82923b37b" />
+  
 ## V1.0.0
 - Initial release
+
+Screenshots of the core functionality (with the V1.2.0 UI):
+
+<img width="450" height="400" alt="image" src="https://github.com/user-attachments/assets/bb40f5d2-1a94-4357-8588-e270afd5988e" /> 
+<img width="450" height="300" alt="image" src="https://github.com/user-attachments/assets/fb5a0289-1ccc-405c-9ad7-46da121e718d" />
+<img width="450" height="400" alt="image" src="https://github.com/user-attachments/assets/835e3149-ef30-45bf-8eee-0390e92c177c" />
+<img width="450" height="400" alt="image" src="https://github.com/user-attachments/assets/e995ea5c-c78f-4dd8-ad5b-7e96173fd4bc" />
+
 
 ## Features
 - Search NPCs by name using the GW2 Wiki
