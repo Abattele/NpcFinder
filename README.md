@@ -10,9 +10,8 @@
 - UI improvements (+changelog)
 - Increase cache size limits (stored up to 25 days)
 
-<img width="450" height="400" alt="image" src="https://github.com/user-attachments/assets/70d7c12e-a8d3-44c0-a6b2-1316fe7e4240" />
 <img width="450" height="400" alt="image" src="https://github.com/user-attachments/assets/edab6133-4c5b-42d7-b2f0-7a68c11f0d41" />
-
+<img width="450" height="400" alt="image" src="https://github.com/user-attachments/assets/70d7c12e-a8d3-44c0-a6b2-1316fe7e4240" />
 
 ## V1.1.0
 - Huge performance increase (worst case scenario takes around 3 minutes)
